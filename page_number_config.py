@@ -1,0 +1,144 @@
+"""
+Page numbering configuration: presets, formatting, and font list loading.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+CONFIG_DIR = Path(__file__).resolve().parent
+FONTS_CONFIG_PATH = CONFIG_DIR / "fonts.json"
+
+CUSTOM_POSITION = "Custom"
+
+# x%, y% from bottom-left corner of the page; anchor for text placement
+POSITION_PRESETS: Dict[str, Tuple[float, float, str]] = {
+    "Bottom Centre": (50.0, 5.0, "center"),
+    "Bottom Left": (10.0, 5.0, "left"),
+    "Bottom Right": (90.0, 5.0, "right"),
+    "Top Left": (10.0, 95.0, "left"),
+    "Top Centre": (50.0, 95.0, "center"),
+    "Top Right": (90.0, 95.0, "right"),
+}
+
+DEFAULT_POSITION = "Bottom Centre"
+DEFAULT_FONT = "Arial"
+DEFAULT_FONT_SIZE = 8.0
+DEFAULT_SEPARATOR = "."
+POSITION_RELATIVE = "relative"
+POSITION_ABSOLUTE = "absolute"
+CM_TO_POINTS = 72.0 / 2.54
+
+
+@dataclass
+class PageNumberSettings:
+    """Settings used when rendering page numbers on PDF output."""
+
+    use_label: bool = False
+    label_text: str = "Page"
+    chapter_prefix: str = ""
+    num_digits: int = 1
+    separator: str = DEFAULT_SEPARATOR
+    position_name: str = DEFAULT_POSITION
+    position_mode: str = POSITION_RELATIVE
+    x_percent: float = 50.0
+    y_percent: float = 5.0
+    x_cm: float = 0.0
+    y_cm: float = 0.0
+    text_anchor: str = "center"
+    font_name: str = DEFAULT_FONT
+    font_size: float = DEFAULT_FONT_SIZE
+    font_color_rgb: Tuple[int, int, int] = (0, 0, 0)
+    suffix: str = ""
+    use_white_background: bool = False
+
+    def format_number(self, page_num: int) -> str:
+        return format_page_number_text(
+            page_num,
+            use_label=self.use_label,
+            label=self.label_text,
+            prefix=self.chapter_prefix,
+            num_digits=self.num_digits,
+            separator=self.separator,
+            suffix=self.suffix,
+        )
+
+
+def load_font_names() -> List[str]:
+    """Load font names from fonts.json; fall back to a built-in list."""
+    try:
+        with open(FONTS_CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        fonts = data.get("fonts", [])
+        if fonts:
+            return list(fonts)
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return [
+        "Arial",
+        "Helvetica",
+        "Segoe UI",
+        "Times New Roman",
+        "Verdana",
+    ]
+
+
+def minimum_digits_for_page_count(total_pages: int) -> int:
+    """
+    Minimum zero-pad width from document length.
+
+    Fewer than 10 pages allows 1 digit; 10+ requires at least 2; 100+ at least 3, etc.
+    """
+    if total_pages <= 0:
+        return 1
+    if total_pages < 10:
+        return 1
+    return len(str(total_pages))
+
+
+def append_page_number_suffix(text: str, suffix: str) -> str:
+    """Append suffix after the formatted page number (adds a space if needed)."""
+    if not suffix:
+        return text
+    if suffix[:1].isspace():
+        return text + suffix
+    return f"{text} {suffix}"
+
+
+def format_page_number_text(
+    page_num: int,
+    *,
+    use_label: bool,
+    label: str,
+    prefix: str,
+    num_digits: int,
+    separator: str = DEFAULT_SEPARATOR,
+    suffix: str = "",
+) -> str:
+    """
+    Build display text for a page number.
+
+    Example: Seite + prefix 5.7 + sep '.' + 3 digits -> "Seite 5.7.001"
+    With suffix '-' -> "Seite 5.7.001 -"
+    """
+    padded = str(page_num).zfill(max(1, num_digits))
+    prefix = prefix.strip()
+    sep = separator if separator else DEFAULT_SEPARATOR
+    if use_label and prefix:
+        core = f"{label} {prefix}{sep}{padded}"
+    elif use_label:
+        core = f"{label} {padded}"
+    elif prefix:
+        core = f"{prefix}{sep}{padded}"
+    else:
+        core = padded
+    return append_page_number_suffix(core, suffix)
+
+
+def preset_anchor(name: str) -> str:
+    if name in POSITION_PRESETS:
+        return POSITION_PRESETS[name][2]
+    return "center"
