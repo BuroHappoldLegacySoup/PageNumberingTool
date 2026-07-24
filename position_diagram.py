@@ -1,25 +1,51 @@
 """
-Small diagram widget showing page-number position as % from bottom-left.
+Small diagram widget showing page-number position as % from a chosen origin corner.
 """
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
+from page_number_config import (
+    DEFAULT_ORIGIN,
+    ORIGIN_BOTTOM_LEFT,
+    ORIGIN_BOTTOM_RIGHT,
+    ORIGIN_TOP_LEFT,
+    ORIGIN_TOP_RIGHT,
+    origin_percent_to_bottom_left_percent,
+)
+
+_ORIGIN_LABELS = {
+    ORIGIN_BOTTOM_LEFT: "bottom-left",
+    ORIGIN_BOTTOM_RIGHT: "bottom-right",
+    ORIGIN_TOP_LEFT: "top-left",
+    ORIGIN_TOP_RIGHT: "top-right",
+}
+
 
 class PositionDiagramWidget(QWidget):
-    """Draws a page rectangle and a marker at (x%, y%) from the bottom-left."""
+    """Draws a page rectangle and a marker at (x%, y%) from the active origin."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._x_percent = 50.0
         self._y_percent = 5.0
+        self._origin = DEFAULT_ORIGIN
         self.setMinimumSize(120, 150)
         self.setMaximumSize(160, 190)
+        self._update_tooltip()
+
+    def _update_tooltip(self) -> None:
+        corner = _ORIGIN_LABELS.get(self._origin, "bottom-left")
         self.setToolTip(
-            "Position is measured from the bottom-left corner of the page.\n"
-            "X and Y are percentages of page width and height."
+            f"Position is measured from the {corner} corner of the page.\n"
+            "X and Y are percentages of page width and height, inward from that corner."
         )
+
+    def set_origin(self, origin: str) -> None:
+        self._origin = origin if origin in _ORIGIN_LABELS else DEFAULT_ORIGIN
+        self._update_tooltip()
+        self.update()
 
     def set_position(self, x_percent: float, y_percent: float) -> None:
         self._x_percent = max(0.0, min(100.0, x_percent))
@@ -35,19 +61,43 @@ class PositionDiagramWidget(QWidget):
         w = self.width() - 2 * margin
         h = self.height() - 2 * margin - 14
         left = margin
-        bottom = self.height() - margin - 12
+        top = margin + 12
+        bottom = top + h
+        right = left + w
 
         painter.setPen(QPen(QColor(80, 80, 80), 1))
         painter.setBrush(QColor(250, 250, 250))
-        painter.drawRect(left, bottom - h, w, h)
+        painter.drawRect(left, top, w, h)
 
+        # Origin marker and axes at the active corner.
         painter.setPen(QPen(QColor(120, 120, 120), 1))
-        painter.drawLine(left, bottom, left + 14, bottom)
-        painter.drawLine(left, bottom, left, bottom - 14)
-        painter.drawText(left + 2, bottom + 11, "0,0")
+        axis = 14
+        if self._origin == ORIGIN_BOTTOM_RIGHT:
+            ox, oy = right, bottom
+            painter.drawLine(ox, oy, ox - axis, oy)
+            painter.drawLine(ox, oy, ox, oy - axis)
+            painter.drawText(ox - 22, oy + 11, "0,0")
+        elif self._origin == ORIGIN_TOP_LEFT:
+            ox, oy = left, top
+            painter.drawLine(ox, oy, ox + axis, oy)
+            painter.drawLine(ox, oy, ox, oy + axis)
+            painter.drawText(ox + 2, oy - 2, "0,0")
+        elif self._origin == ORIGIN_TOP_RIGHT:
+            ox, oy = right, top
+            painter.drawLine(ox, oy, ox - axis, oy)
+            painter.drawLine(ox, oy, ox, oy + axis)
+            painter.drawText(ox - 22, oy - 2, "0,0")
+        else:
+            ox, oy = left, bottom
+            painter.drawLine(ox, oy, ox + axis, oy)
+            painter.drawLine(ox, oy, ox, oy - axis)
+            painter.drawText(ox + 2, oy + 11, "0,0")
 
-        x = left + (self._x_percent / 100.0) * w
-        y = bottom - (self._y_percent / 100.0) * h
+        bl_x, bl_y = origin_percent_to_bottom_left_percent(
+            self._x_percent, self._y_percent, self._origin
+        )
+        x = left + (bl_x / 100.0) * w
+        y = bottom - (bl_y / 100.0) * h
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(206, 220, 0))

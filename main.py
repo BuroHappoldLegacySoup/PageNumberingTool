@@ -2,8 +2,23 @@
 Main entry point for the Page Numbering Tool application.
 """
 
+import os
 import sys
-from pathlib import Path
+
+
+def _ensure_stdio() -> None:
+    """
+    PyInstaller --noconsole builds leave sys.stdout/stderr as None.
+    Anything that writes progress/logging to stdout (e.g. tqdm) then fails with:
+    'NoneType' object has no attribute 'write'.
+    """
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8", errors="replace")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8", errors="replace")
+
+
+_ensure_stdio()
 
 from PyQt6.QtWidgets import QApplication
 

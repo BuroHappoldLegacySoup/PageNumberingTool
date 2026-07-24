@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 SESSION_FOLDER_NAME = "Page Numbering Tool"
-SESSION_VERSION = 1
+SESSION_VERSION = 2
 
 
 def session_directory() -> Path:
