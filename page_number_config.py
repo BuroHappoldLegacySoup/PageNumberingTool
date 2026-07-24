@@ -14,17 +14,24 @@ FONTS_CONFIG_PATH = CONFIG_DIR / "fonts.json"
 
 CUSTOM_POSITION = "Custom"
 
-# x%, y% from bottom-left corner of the page; anchor for text placement
-POSITION_PRESETS: Dict[str, Tuple[float, float, str]] = {
-    "Bottom Centre": (50.0, 5.0, "center"),
-    "Bottom Left": (10.0, 5.0, "left"),
-    "Bottom Right": (90.0, 5.0, "right"),
-    "Top Left": (10.0, 95.0, "left"),
-    "Top Centre": (50.0, 95.0, "center"),
-    "Top Right": (90.0, 95.0, "right"),
+# Coordinate origin for X/Y offsets (margins measured inward from this corner).
+ORIGIN_BOTTOM_LEFT = "bottom_left"
+ORIGIN_BOTTOM_RIGHT = "bottom_right"
+ORIGIN_TOP_LEFT = "top_left"
+ORIGIN_TOP_RIGHT = "top_right"
+
+# x%, y% from the preset's origin corner; text anchor; origin corner
+POSITION_PRESETS: Dict[str, Tuple[float, float, str, str]] = {
+    "Bottom Centre": (50.0, 5.0, "center", ORIGIN_BOTTOM_LEFT),
+    "Bottom Left": (10.0, 5.0, "left", ORIGIN_BOTTOM_LEFT),
+    "Bottom Right": (10.0, 5.0, "right", ORIGIN_BOTTOM_RIGHT),
+    "Top Left": (10.0, 5.0, "left", ORIGIN_TOP_LEFT),
+    "Top Centre": (50.0, 5.0, "center", ORIGIN_TOP_LEFT),
+    "Top Right": (10.0, 5.0, "right", ORIGIN_TOP_RIGHT),
 }
 
 DEFAULT_POSITION = "Bottom Centre"
+DEFAULT_ORIGIN = ORIGIN_BOTTOM_LEFT
 DEFAULT_FONT = "Arial"
 DEFAULT_FONT_SIZE = 8.0
 DEFAULT_SEPARATOR = "."
@@ -44,6 +51,7 @@ class PageNumberSettings:
     separator: str = DEFAULT_SEPARATOR
     position_name: str = DEFAULT_POSITION
     position_mode: str = POSITION_RELATIVE
+    position_origin: str = DEFAULT_ORIGIN
     x_percent: float = 50.0
     y_percent: float = 5.0
     x_cm: float = 0.0
@@ -142,3 +150,46 @@ def preset_anchor(name: str) -> str:
     if name in POSITION_PRESETS:
         return POSITION_PRESETS[name][2]
     return "center"
+
+
+def preset_origin(name: str) -> str:
+    if name in POSITION_PRESETS:
+        return POSITION_PRESETS[name][3]
+    return DEFAULT_ORIGIN
+
+
+def origin_offsets_to_bottom_left(
+    offset_x: float,
+    offset_y: float,
+    width: float,
+    height: float,
+    origin: str,
+) -> Tuple[float, float]:
+    """
+    Convert offsets measured inward from ``origin`` into bottom-left viewer coords.
+
+    X increases away from a left/right origin toward the opposite side.
+    Y increases away from a bottom/top origin toward the opposite side.
+    """
+    if origin == ORIGIN_BOTTOM_RIGHT:
+        return width - offset_x, offset_y
+    if origin == ORIGIN_TOP_LEFT:
+        return offset_x, height - offset_y
+    if origin == ORIGIN_TOP_RIGHT:
+        return width - offset_x, height - offset_y
+    return offset_x, offset_y
+
+
+def origin_percent_to_bottom_left_percent(
+    x_percent: float,
+    y_percent: float,
+    origin: str,
+) -> Tuple[float, float]:
+    """Map origin-relative percentages to bottom-left percentages for previews."""
+    if origin == ORIGIN_BOTTOM_RIGHT:
+        return 100.0 - x_percent, y_percent
+    if origin == ORIGIN_TOP_LEFT:
+        return x_percent, 100.0 - y_percent
+    if origin == ORIGIN_TOP_RIGHT:
+        return 100.0 - x_percent, 100.0 - y_percent
+    return x_percent, y_percent

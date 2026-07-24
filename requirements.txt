@@ -2,5 +2,7 @@ PyQt6
 PyPDF2
 python-docx
 reportlab
-docx2pdf
+pywin32
+pdfplumber
+pikepdf
 
