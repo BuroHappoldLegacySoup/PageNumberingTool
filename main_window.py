@@ -1,5 +1,5 @@
 """
-Main window module for the Page Numbering Tool application.
+Main window module for The Reportinator application.
 Contains the PyQt6 UI components and main application logic.
 """
 
@@ -74,7 +74,7 @@ LIME_GREEN = QColor(206, 220, 0)
 
 class MainWindow(QMainWindow):
     """
-    Main application window for the Page Numbering Tool.
+    Main application window for The Reportinator.
     
     Attributes:
         file_handler: FileHandler instance for file operations
@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         self._footer_hint: Optional[FooterLineHint] = None
         self._current_session_path: Optional[Path] = initial_session_path
         
-        self.setWindowTitle("Page Numbering Tool")
+        self.setWindowTitle("The Reportinator")
         self.setGeometry(100, 100, 1100, 820)
         
         self._setup_ui()
@@ -1665,7 +1665,7 @@ class MainWindow(QMainWindow):
         msg.setIcon(QMessageBox.Icon.Information)
         msg.setText(
             "Files have been combined and page numbers added. "
-            "TOC chapter links are preserved in the output PDF."
+            "TOC chapter links and hierarchical bookmarks are included in the output PDF."
         )
         info = f"Saved to:\n{output_path}"
         if extra_note:

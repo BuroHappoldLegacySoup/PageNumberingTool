@@ -17,7 +17,13 @@ from page_number_config import (
     CM_TO_POINTS,
     origin_offsets_to_bottom_left,
 )
-from toc_handler import TocInfo, update_toc_page_in_place, _group_words_into_lines
+from toc_handler import (
+    TocInfo,
+    adjust_toc_page_numbers,
+    apply_toc_bookmarks,
+    update_toc_page_in_place,
+    _group_words_into_lines,
+)
 
 POINTS_TO_CM = 2.54 / 72.0
 
@@ -329,8 +335,24 @@ class PDFProcessor:
                 True,
                 False,
             )
-            # 17 = wdFormatPDF
-            doc.SaveAs(output_abs_path, FileFormat=17)
+            # ExportAsFixedFormat (not SaveAs) so heading-based PDF bookmarks
+            # are created — same as Word's "Create bookmarks using: Headings".
+            # 17 = wdExportFormatPDF
+            # 1  = wdExportCreateHeadingBookmarks
+            doc.ExportAsFixedFormat(
+                OutputFileName=output_abs_path,
+                ExportFormat=17,
+                OpenAfterExport=False,
+                OptimizeFor=0,  # wdExportOptimizeForPrint
+                Range=0,  # wdExportAllDocument
+                Item=0,  # wdExportDocumentContent
+                IncludeDocProps=True,
+                KeepIRM=True,
+                CreateBookmarks=1,  # wdExportCreateHeadingBookmarks
+                DocStructureTags=True,
+                BitmapMissingFonts=True,
+                UseISO19005_1=False,
+            )
         finally:
             if doc is not None:
                 try:
@@ -1256,4 +1278,16 @@ class PDFProcessor:
             page_number_settings,
             preserve_links=True,
         )
+
+        # Rebuild the PDF outline from the TOC so the sidebar bookmarks match
+        # TOC hierarchy and point at post-insertion page positions.
+        if toc_info is not None and toc_info.entries:
+            insertion_counts = self._insertion_page_counts(pdf_insertions)
+            adjusted_entries = adjust_toc_page_numbers(
+                toc_info.entries, insertion_counts
+            )
+            try:
+                apply_toc_bookmarks(output_path, adjusted_entries)
+            except Exception:
+                pass
 

@@ -1,5 +1,5 @@
 """
-Table of contents extraction and in-place update for the Page Numbering Tool.
+Table of contents extraction and in-place update for The Reportinator.
 """
 
 from __future__ import annotations
@@ -77,6 +77,8 @@ def _is_toc_title_text(text: str) -> Optional[str]:
     return None
 
 CHAPTER_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+(.+)$")
+# Bare numbered heading such as "1.2.3" or "1." with little/no title text.
+CHAPTER_NUMBER_ONLY_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s*$")
 
 
 def parse_chapter_parts(title: str) -> Tuple[Optional[str], str]:
@@ -92,7 +94,95 @@ def parse_chapter_parts(title: str) -> Tuple[Optional[str], str]:
     match = CHAPTER_NUMBER_RE.match(stripped)
     if match:
         return match.group(1), match.group(2).strip()
+    only = CHAPTER_NUMBER_ONLY_RE.match(stripped)
+    if only:
+        return only.group(1), ""
     return None, stripped
+
+
+def level_from_chapter_number(title: str) -> Optional[int]:
+    """
+    Infer hierarchy depth from a dotted chapter number.
+
+    Examples:
+        "1 Introduction" -> 1
+        "1.2 Scope" -> 2
+        "1.2.3 Details" -> 3
+        "Appendix" -> None
+    """
+    number, _ = parse_chapter_parts(title)
+    if not number:
+        return None
+    return number.count(".") + 1
+
+
+def _levels_from_relative_indents(
+    lefts: List[float],
+    tolerance: float = 10.0,
+) -> List[int]:
+    """
+    Map absolute left positions to 1-based levels by clustering similar indents.
+    """
+    if not lefts:
+        return []
+    ordered = sorted(set(round(x, 1) for x in lefts))
+    clusters: List[float] = [ordered[0]]
+    for value in ordered[1:]:
+        if value - clusters[-1] >= tolerance:
+            clusters.append(value)
+    levels: List[int] = []
+    for left in lefts:
+        best = min(range(len(clusters)), key=lambda i: abs(clusters[i] - left))
+        levels.append(best + 1)
+    return levels
+
+
+def apply_hierarchy_levels(entries: List[TocEntry]) -> List[TocEntry]:
+    """
+    Ensure TOC entries have nesting levels suitable for PDF bookmarks.
+
+    Prefers dotted chapter numbers (1 / 1.2 / 1.2.3). Falls back to any
+    existing level, then smooths so depth never jumps by more than one.
+    """
+    if not entries:
+        return []
+
+    numbered = [level_from_chapter_number(entry.title) for entry in entries]
+    numbered_count = sum(1 for level in numbered if level is not None)
+
+    resolved: List[int] = []
+    if numbered_count >= max(2, (len(entries) + 1) // 2):
+        # Numbered TOC: use chapter depth; fill gaps from neighbours / existing.
+        last_level = 1
+        for entry, num_level in zip(entries, numbered):
+            if num_level is not None:
+                level = num_level
+            else:
+                level = max(1, int(entry.level or last_level))
+            resolved.append(level)
+            last_level = level
+    else:
+        resolved = [max(1, int(entry.level or 1)) for entry in entries]
+
+    # Smooth: depth may only increase by one step at a time.
+    smoothed: List[int] = []
+    for index, level in enumerate(resolved):
+        level = max(1, int(level))
+        if index == 0:
+            if numbered[0] is None:
+                level = 1
+        else:
+            level = min(level, smoothed[-1] + 1)
+        smoothed.append(level)
+
+    return [
+        TocEntry(
+            title=entry.title,
+            page_number=entry.page_number,
+            level=level,
+        )
+        for entry, level in zip(entries, smoothed)
+    ]
 
 
 @dataclass
@@ -621,17 +711,51 @@ def _entries_point_at_toc_pages(
     return entry_pages <= toc_pages
 
 
-def _match_outline_page(title: str, outline_entries: List[TocEntry]) -> int:
+def _match_outline_entry(title: str, outline_entries: List[TocEntry]) -> Optional[TocEntry]:
     needle = _normalize_title(title)
     if not needle:
-        return 0
+        return None
     for entry in outline_entries:
         other = _normalize_title(entry.title)
         if not other:
             continue
         if needle == other or needle in other or other in needle:
-            return entry.page_number
-    return 0
+            return entry
+    return None
+
+
+def _match_outline_page(title: str, outline_entries: List[TocEntry]) -> int:
+    matched = _match_outline_entry(title, outline_entries)
+    return matched.page_number if matched is not None else 0
+
+
+def _enrich_levels_from_outline(
+    entries: List[TocEntry],
+    outline_entries: List[TocEntry],
+) -> List[TocEntry]:
+    """Copy nesting depth from PDF outline entries when TOC levels are flat."""
+    if not entries or not outline_entries:
+        return entries
+
+    outline_levels = {id(e): e.level for e in outline_entries}
+    if max(outline_levels.values(), default=1) <= 1:
+        return entries
+
+    enriched: List[TocEntry] = []
+    for entry in entries:
+        level = entry.level
+        if level_from_chapter_number(entry.title) is None:
+            matched = _match_outline_entry(entry.title, outline_entries)
+            if matched is not None and matched.level > 0:
+                level = matched.level
+        enriched.append(
+            TocEntry(
+                title=entry.title,
+                page_number=entry.page_number,
+                level=level,
+            )
+        )
+    return enriched
 
 
 def _printed_numbers_are_trustworthy(
@@ -781,13 +905,17 @@ def _extract_toc_entries_from_layout(
 
     Handles hyphen-wrapped page numbers such as "- 12 -" and multi-line titles where
     the page number appears only on the last wrapped line.
+
+    Hierarchy comes primarily from dotted chapter numbers (1 / 1.2 / 1.2.3) and
+    secondarily from relative left indentation on the TOC page.
     """
     if toc_page_index < 0:
         return []
 
-    entries: List[TocEntry] = []
+    # (left, title, page_number) collected in reading order
+    raw_rows: List[Tuple[float, str, int]] = []
     pending_title = ""
-    pending_level = 1
+    pending_left = 0.0
 
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -815,46 +943,51 @@ def _extract_toc_entries_from_layout(
                     )
 
                     left = float(line_words[0]["x0"])
-                    level = 1
-                    if left > 90:
-                        level = 2
-                    if left > 120:
-                        level = 3
 
                     if page_number is None:
                         # Title wrap / first line of a multi-line TOC entry.
                         if _looks_like_toc_entry_start(title):
-                            # New numbered heading replaces any unfinished wrap.
-                            if CHAPTER_NUMBER_RE.match(title.strip()):
+                            if CHAPTER_NUMBER_RE.match(title.strip()) or (
+                                level_from_chapter_number(title) is not None
+                            ):
                                 pending_title = title
-                                pending_level = level
+                                pending_left = left
                             elif pending_title:
                                 pending_title = _merge_wrapped_toc_title(
                                     pending_title, title
                                 )
                             else:
                                 pending_title = title
-                                pending_level = level
+                                pending_left = left
                         continue
 
-                    entry_level = pending_level if pending_title else level
+                    row_left = pending_left if pending_title else left
                     full_title = _merge_wrapped_toc_title(pending_title, title)
                     pending_title = ""
-                    pending_level = 1
+                    pending_left = 0.0
                     if len(full_title) < 2:
                         continue
 
-                    entries.append(
-                        TocEntry(
-                            title=full_title,
-                            page_number=page_number,
-                            level=entry_level,
-                        )
-                    )
+                    raw_rows.append((row_left, full_title, page_number))
     except Exception:
-        return entries
+        return []
 
-    return entries
+    if not raw_rows:
+        return []
+
+    indent_levels = _levels_from_relative_indents([row[0] for row in raw_rows])
+    entries: List[TocEntry] = []
+    for (left, title, page_number), indent_level in zip(raw_rows, indent_levels):
+        number_level = level_from_chapter_number(title)
+        level = number_level if number_level is not None else indent_level
+        entries.append(
+            TocEntry(
+                title=title,
+                page_number=page_number,
+                level=max(1, level),
+            )
+        )
+    return apply_hierarchy_levels(entries)
 
 
 def _walk_outline(
@@ -910,7 +1043,11 @@ def _parse_toc_lines(text: str) -> Tuple[Optional[str], List[TocEntry]]:
             full_title = _merge_wrapped_toc_title(pending_title, title.strip())
             pending_title = ""
             pending_indent = ""
-            level = max(1, min(6, len(indent) // 2 + 1))
+            number_level = level_from_chapter_number(full_title)
+            if number_level is not None:
+                level = number_level
+            else:
+                level = max(1, min(6, len(indent) // 2 + 1))
             entries.append(
                 TocEntry(
                     title=full_title,
@@ -1111,6 +1248,10 @@ def extract_toc_from_pdf(pdf_path: str) -> TocInfo:
     else:
         return TocInfo(page_width=width, page_height=height)
 
+    if source == "toc_page":
+        entries = _enrich_levels_from_outline(entries, outline_entries)
+    entries = apply_hierarchy_levels(entries)
+
     if toc_page_index >= 0:
         page_width, page_height = _page_size(reader, toc_page_index)
     else:
@@ -1172,7 +1313,7 @@ def extract_toc(
                 skip = {0, 1, 2, 3, 4}
             resolved = _resolve_heading_pages(reader, heading_entries, skip)
             if resolved:
-                info.entries = resolved
+                info.entries = apply_hierarchy_levels(resolved)
                 info.source = "docx_headings"
 
     return info
@@ -1241,6 +1382,84 @@ def build_toc_overlay_pdf(
         c.showPage()
 
     c.save()
+    return True
+
+
+def apply_toc_bookmarks(
+    pdf_path: str,
+    entries: List[TocEntry],
+    output_path: Optional[str] = None,
+) -> bool:
+    """
+    Write a hierarchical PDF outline (sidebar bookmarks) from TOC entries.
+
+    Entry ``level`` values become nesting; ``page_number`` is 1-based and must
+    already reflect any insertions. Existing bookmarks are replaced.
+    """
+    if not entries:
+        return False
+
+    try:
+        import pikepdf
+        from pikepdf import OutlineItem
+    except ImportError as exc:
+        raise ImportError(
+            "pikepdf is required to write PDF bookmarks. "
+            "Install it with: pip install pikepdf"
+        ) from exc
+
+    import os
+    import tempfile
+
+    dest_path = output_path or pdf_path
+    entries = apply_hierarchy_levels(entries)
+    wrote_any = False
+
+    # Always save via a temp file, then replace — Windows cannot overwrite a
+    # path that pikepdf still has open.
+    fd, temp_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        with pikepdf.Pdf.open(pdf_path) as pdf:
+            page_count = len(pdf.pages)
+            if page_count == 0:
+                return False
+
+            with pdf.open_outline() as outline:
+                outline.root.clear()
+                stack: List[Tuple[int, OutlineItem]] = []
+
+                for entry in entries:
+                    if entry.page_number <= 0:
+                        continue
+                    page_index = min(page_count - 1, max(0, entry.page_number - 1))
+                    title = (entry.title or "").strip() or f"Page {entry.page_number}"
+                    item = OutlineItem(title, page_index)
+                    level = max(1, int(entry.level or 1))
+
+                    while stack and stack[-1][0] >= level:
+                        stack.pop()
+                    if stack:
+                        stack[-1][1].children.append(item)
+                    else:
+                        outline.root.append(item)
+                    stack.append((level, item))
+                    wrote_any = True
+
+            if not wrote_any:
+                return False
+
+            pdf.save(temp_path)
+
+        os.replace(temp_path, dest_path)
+        temp_path = ""  # ownership transferred
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
     return True
 
 
