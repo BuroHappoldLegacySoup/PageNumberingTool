@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from session_manager import list_session_files, session_directory
+from backend.session_manager import list_session_files, session_directory
 
 
 class SessionStartDialog(QDialog):

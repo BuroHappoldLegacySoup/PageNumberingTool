@@ -10,14 +10,14 @@ import tempfile
 import os
 import platform
 
-from page_number_config import (
+from backend.page_number_config import (
     PageNumberSettings,
     DEFAULT_FONT,
     POSITION_ABSOLUTE,
     CM_TO_POINTS,
     origin_offsets_to_bottom_left,
 )
-from toc_handler import (
+from backend.toc_handler import (
     TocInfo,
     adjust_toc_page_numbers,
     apply_toc_bookmarks,
@@ -594,24 +594,6 @@ class PDFProcessor:
             writer.write(handle)
         return output_path
 
-    def merge_pdfs(self, pdf_paths: List[str], output_path: str) -> None:
-        """
-        Merge multiple PDF files into a single PDF.
-        
-        Args:
-            pdf_paths: List of paths to PDF files to merge
-            output_path: Path where the merged PDF should be saved
-        """
-        writer = PdfWriter()
-        
-        for pdf_path in pdf_paths:
-            reader = PdfReader(pdf_path)
-            for page in reader.pages:
-                writer.add_page(page)
-        
-        with open(output_path, 'wb') as output_file:
-            writer.write(output_file)
-    
     def _repair_pdf(self, input_path: str, output_path: str) -> None:
         """
         Re-write a PDF through PdfWriter to rebuild a consistent object table.
@@ -1103,70 +1085,6 @@ class PDFProcessor:
 
             pdf.save(output_path)
     
-    def process_files(
-        self,
-        file_paths: List[str],
-        buffer_pages: List[int],
-        output_path: str,
-        start_page_number: int = 1,
-        pre_converted_pdfs: Optional[Dict[str, str]] = None,
-        page_number_settings: Optional[PageNumberSettings] = None,
-    ) -> None:
-        """
-        Process files: convert Word to PDF, add buffers, merge, and add page numbers.
-        
-        Args:
-            file_paths: List of file paths (PDF or Word)
-            buffer_pages: List of buffer page counts (one per file)
-            output_path: Path where the final PDF should be saved
-            start_page_number: Starting page number (default: 1)
-            pre_converted_pdfs: Optional dictionary mapping Word file paths to already-converted PDF paths
-        """
-        from pathlib import Path
-        
-        def get_file_extension(file_path: str) -> str:
-            """Get file extension."""
-            return Path(file_path).suffix.lower()
-        processed_pdfs: List[str] = []
-        temp_dir = self._create_temp_dir()
-        
-        if pre_converted_pdfs is None:
-            pre_converted_pdfs = {}
-        
-        try:
-            # Process each file
-            for file_path, buffer_count in zip(file_paths, buffer_pages):
-                file_ext = get_file_extension(file_path)
-                
-                # Convert Word to PDF if needed (use pre-converted if available)
-                if file_ext in ['.docx', '.doc']:
-                    if file_path in pre_converted_pdfs:
-                        pdf_path = pre_converted_pdfs[file_path]
-                    else:
-                        pdf_path = self.convert_word_to_pdf(file_path)
-                else:
-                    pdf_path = file_path
-                
-                # Add buffer pages if needed
-                if buffer_count > 0:
-                    buffered_pdf = self.add_buffer_pages(pdf_path, buffer_count)
-                    processed_pdfs.append(buffered_pdf)
-                else:
-                    processed_pdfs.append(pdf_path)
-            
-            # Merge all PDFs
-            merged_pdf = os.path.join(temp_dir, 'merged.pdf')
-            self.merge_pdfs(processed_pdfs, merged_pdf)
-            
-            # Add page numbers
-            self.add_page_numbers(
-                merged_pdf, output_path, start_page_number, page_number_settings
-            )
-            
-        finally:
-            # Cleanup is handled by the system, but we could add explicit cleanup here
-            pass
-    
     def _insertion_page_counts(
         self,
         insertions: List[Tuple[int, str]],
@@ -1201,7 +1119,7 @@ class PDFProcessor:
             start_page_number: Starting page number for footer numbering
             pre_converted_pdfs: Optional map of Word paths to already-converted PDF paths
         """
-        from page_spec import parse_pages_spec
+        from backend.page_spec import parse_pages_spec
 
         def get_file_extension(file_path: str) -> str:
             return Path(file_path).suffix.lower()

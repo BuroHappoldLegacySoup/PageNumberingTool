@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-CONFIG_DIR = Path(__file__).resolve().parent
+CONFIG_DIR = Path(__file__).resolve().parent.parent
 FONTS_CONFIG_PATH = CONFIG_DIR / "fonts.json"
 
 CUSTOM_POSITION = "Custom"
@@ -150,12 +150,6 @@ def preset_anchor(name: str) -> str:
     if name in POSITION_PRESETS:
         return POSITION_PRESETS[name][2]
     return "center"
-
-
-def preset_origin(name: str) -> str:
-    if name in POSITION_PRESETS:
-        return POSITION_PRESETS[name][3]
-    return DEFAULT_ORIGIN
 
 
 def origin_offsets_to_bottom_left(

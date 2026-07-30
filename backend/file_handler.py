@@ -3,9 +3,8 @@ File handler module for managing file operations.
 Handles file selection, validation, and conversion operations.
 """
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from pathlib import Path
-import os
 
 
 class FileHandler:
@@ -42,18 +41,6 @@ class FileHandler:
         extension = path.suffix.lower()
         return extension in self.supported_extensions
     
-    def get_file_extension(self, file_path: str) -> str:
-        """
-        Get the file extension from a file path.
-        
-        Args:
-            file_path: Path to the file
-            
-        Returns:
-            File extension (e.g., '.pdf', '.docx')
-        """
-        return Path(file_path).suffix.lower()
-    
     def get_file_name(self, file_path: str) -> str:
         """
         Get the file name from a file path.
@@ -86,9 +73,3 @@ class FileHandler:
                 invalid_files.append(file_path)
         
         return valid_files, invalid_files
-
-
-
-
-
-

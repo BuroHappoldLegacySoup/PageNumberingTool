@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
-from page_number_config import (
+from backend.page_number_config import (
     DEFAULT_ORIGIN,
     ORIGIN_BOTTOM_LEFT,
     ORIGIN_BOTTOM_RIGHT,

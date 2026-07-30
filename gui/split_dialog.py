@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from page_spec import parse_split_groups
+from backend.page_spec import parse_split_groups
 
 
 class SplitPagesDialog(QDialog):

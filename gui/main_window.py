@@ -19,15 +19,15 @@ from datetime import datetime
 import json
 import sys
 
-from file_handler import FileHandler
-from pdf_processor import PDFProcessor, FooterLineHint
-from page_spec import (
+from backend.file_handler import FileHandler
+from backend.pdf_processor import PDFProcessor, FooterLineHint
+from backend.page_spec import (
     InsertionSegment,
     count_pages_in_spec,
     format_pages_display,
 )
-from split_dialog import SplitPagesDialog
-from page_number_config import (
+from gui.split_dialog import SplitPagesDialog
+from backend.page_number_config import (
     PageNumberSettings,
     load_font_names,
     minimum_digits_for_page_count,
@@ -45,8 +45,8 @@ from page_number_config import (
     preset_anchor,
 )
 
-from position_diagram import PositionDiagramWidget
-from ui_helpers import (
+from gui.position_diagram import PositionDiagramWidget
+from gui.ui_helpers import (
     add_form_row,
     configure_compact_grid,
     prepare_line_edit,
@@ -55,14 +55,14 @@ from ui_helpers import (
     prepare_combo_box,
     FIELD_MIN_HEIGHT,
 )
-from session_manager import (
+from backend.session_manager import (
     session_directory,
     build_session_filename,
     save_session,
     load_session,
     windows_username,
 )
-from toc_handler import TocInfo, extract_toc
+from backend.toc_handler import TocInfo, extract_toc
 
 A4_WIDTH_CM = 21.0
 A4_HEIGHT_CM = 29.7

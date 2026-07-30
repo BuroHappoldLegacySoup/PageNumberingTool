@@ -22,8 +22,8 @@ _ensure_stdio()
 
 from PyQt6.QtWidgets import QApplication
 
-from main_window import MainWindow
-from session_dialog import SessionStartDialog
+from gui.main_window import MainWindow
+from gui.session_dialog import SessionStartDialog
 
 
 def main() -> None:
