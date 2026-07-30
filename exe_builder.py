@@ -1,5 +1,5 @@
 """
-Build a standalone Windows executable for the Page Numbering Tool.
+Build a standalone Windows executable for The Reportinator.
 """
 
 import os
@@ -12,6 +12,7 @@ desktop_dir = os.path.join(os.path.expanduser("~"), "Desktop")
 main_script = os.path.join(script_dir, "main.py")
 icon_path = os.path.join(script_dir, "PageNumber.ico")
 fonts_json = os.path.join(script_dir, "fonts.json")
+APP_NAME = "TheReportinator"
 
 
 def ensure_pyinstaller() -> None:
@@ -35,7 +36,7 @@ def build_command() -> list[str]:
         "--onefile",
         "--noconsole",
         "--name",
-        "PageNumberingTool",
+        APP_NAME,
         "--icon",
         icon_path,
         "--exclude-module",
@@ -71,7 +72,7 @@ def cleanup_artifacts() -> None:
             shutil.rmtree(path, ignore_errors=True)
             print(f"Cleaned up {directory}/")
 
-    spec_path = os.path.join(script_dir, "PageNumberingTool.spec")
+    spec_path = os.path.join(script_dir, f"{APP_NAME}.spec")
     if os.path.isfile(spec_path):
         os.remove(spec_path)
         print(f"Cleaned up {os.path.basename(spec_path)}")
@@ -100,7 +101,7 @@ def main() -> int:
         print("PyInstaller failed.")
         return result.returncode
 
-    print(f"Build succeeded. Executable is on the Desktop: PageNumberingTool.exe")
+    print(f"Build succeeded. Executable is on the Desktop: {APP_NAME}.exe")
     cleanup_artifacts()
     return 0
 

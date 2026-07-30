@@ -1,5 +1,5 @@
 """
-Main entry point for the Page Numbering Tool application.
+Main entry point for The Reportinator application.
 """
 
 import os

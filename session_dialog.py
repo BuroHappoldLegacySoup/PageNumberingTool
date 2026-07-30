@@ -27,7 +27,7 @@ class SessionStartDialog(QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Page Numbering Tool — Session")
+        self.setWindowTitle("The Reportinator — Session")
         self.setMinimumWidth(520)
         self.setMinimumHeight(360)
 

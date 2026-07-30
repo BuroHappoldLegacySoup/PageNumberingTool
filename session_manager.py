@@ -12,12 +12,12 @@ from getpass import getuser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-SESSION_FOLDER_NAME = "Page Numbering Tool"
+SESSION_FOLDER_NAME = "The Reportinator"
 SESSION_VERSION = 2
 
 
 def session_directory() -> Path:
-    """Return ~/Page Numbering Tool, creating it if needed."""
+    """Return ~/The Reportinator, creating it if needed."""
     folder = Path.home() / SESSION_FOLDER_NAME
     folder.mkdir(parents=True, exist_ok=True)
     return folder
