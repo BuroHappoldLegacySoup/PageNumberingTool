@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 SESSION_FOLDER_NAME = "The Reportinator"
-SESSION_VERSION = 2
+# v2: flat inserter-only payload. v3: separate ``inserter`` / ``swapper`` tabs.
+SESSION_VERSION = 3
 
 
 def session_directory() -> Path:
@@ -78,3 +79,56 @@ def load_session(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Session file is not a valid JSON object")
     return data
+
+
+def inserter_section(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return the Insert-tab payload.
+
+    Supports v3 ``inserter`` blocks and legacy flat ``files`` / ``numbering``.
+    """
+    block = data.get("inserter")
+    if isinstance(block, dict):
+        return block
+    return {
+        "files": data.get("files", {}) if isinstance(data.get("files"), dict) else {},
+        "numbering": (
+            data.get("numbering", {}) if isinstance(data.get("numbering"), dict) else {}
+        ),
+    }
+
+
+def swapper_section(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the Swap-tab payload (empty dict when absent / legacy-only)."""
+    block = data.get("swapper")
+    return block if isinstance(block, dict) else {}
+
+
+def numbering_from_session(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Numbering settings from a session (inserter section or legacy root)."""
+    numbering = inserter_section(data).get("numbering")
+    return numbering if isinstance(numbering, dict) else {}
+
+
+def primary_action_button_style(lime_hex: str) -> str:
+    """Shared big lime-green style for Save PDF / Save Session buttons."""
+    return f"""
+        QPushButton {{
+            background-color: {lime_hex};
+            color: #000000;
+            font-weight: bold;
+            font-size: 14px;
+            border: 2px solid {lime_hex};
+            border-radius: 5px;
+            padding: 10px;
+        }}
+        QPushButton:hover {{
+            background-color: #B8C800;
+            border-color: #B8C800;
+        }}
+        QPushButton:disabled {{
+            background-color: #E0E0E0;
+            color: #808080;
+            border-color: #E0E0E0;
+        }}
+    """

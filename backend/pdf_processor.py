@@ -3,7 +3,7 @@ PDF processor module for merging PDFs and adding page numbers.
 Handles PDF operations including merging, page numbering, and Word to PDF conversion.
 """
 
-from typing import List, Optional, Union, Dict, Tuple, cast
+from typing import Any, List, Optional, Union, Dict, Tuple, cast
 from pathlib import Path
 from dataclasses import dataclass
 import tempfile
@@ -17,6 +17,7 @@ from backend.page_number_config import (
     CM_TO_POINTS,
     origin_offsets_to_bottom_left,
 )
+from backend.page_geometry import PageType, classify_page
 from backend.toc_handler import (
     TocInfo,
     adjust_toc_page_numbers,
@@ -30,11 +31,12 @@ POINTS_TO_CM = 2.54 / 72.0
 
 @dataclass
 class FooterLineHint:
-    """Y position of the lowest text line in the footer band of a sample page."""
+    """Baseline Y of the lowest footer text line on a sample page."""
 
     page_number: int
     page_height_pt: float
     page_width_pt: float
+    # Estimated text baseline distance from the page bottom (stamp Y).
     y_from_bottom_pt: float
     sample_text: str = ""
 
@@ -152,18 +154,124 @@ class PDFProcessor:
             self.temp_dir = None
         self._word_pdf_cache.clear()
 
+    @staticmethod
+    def _footer_lines_from_page(
+        page: Any,
+        *,
+        bottom_band_fraction: float,
+    ) -> List[Tuple[float, float, float, str]]:
+        """
+        Collect footer-band text lines as (line_top, line_bottom, baseline_from_top, text).
+
+        Coordinates are pdfplumber distances from the page top. Prefers
+        ``extract_text_lines``; falls back to word grouping. Baseline is estimated
+        from the line box (top + ~80% of a capped height) so padded bboxes do not
+        push stamps below the visible text.
+        """
+        height = float(page.height or 0.0)
+        if height <= 0:
+            return []
+
+        band_fraction = max(0.05, min(0.45, bottom_band_fraction))
+        band_top = height * (1.0 - band_fraction)
+        collected: List[Tuple[float, float, float, str]] = []
+
+        def _baseline_from_box(top: float, bottom: float, size_hint: float = 0.0) -> float:
+            box_h = max(1.0, bottom - top)
+            # extract_text_lines often pads below glyphs; cap to a plausible size.
+            size = size_hint if size_hint > 0 else box_h
+            size = max(5.0, min(size, box_h, 16.0))
+            return top + size * 0.80
+
+        text_lines = None
+        try:
+            text_lines = page.extract_text_lines() or []
+        except Exception:
+            text_lines = None
+
+        if text_lines:
+            for line in text_lines:
+                top = float(line.get("top", 0.0))
+                if top < band_top:
+                    continue
+                bottom = float(line.get("bottom", top))
+                text = str(line.get("text", "") or "").strip()
+                if not text:
+                    continue
+                size_hint = float(line.get("size", 0.0) or 0.0)
+                baseline = _baseline_from_box(top, bottom, size_hint)
+                collected.append((top, bottom, baseline, text))
+        else:
+            words = page.extract_words(extra_attrs=["size"]) or []
+            footer_words = [
+                word for word in words if float(word.get("top", 0.0)) >= band_top
+            ]
+            for line_words in _group_words_into_lines(footer_words):
+                if not line_words:
+                    continue
+                top = min(float(word["top"]) for word in line_words)
+                bottom = max(float(word["bottom"]) for word in line_words)
+                sizes = [
+                    float(word.get("size", 0.0) or 0.0)
+                    for word in line_words
+                    if float(word.get("size", 0.0) or 0.0) > 0
+                ]
+                size_hint = sorted(sizes)[len(sizes) // 2] if sizes else 0.0
+                text = " ".join(
+                    word["text"]
+                    for word in sorted(line_words, key=lambda item: float(item["x0"]))
+                ).strip()
+                if not text:
+                    continue
+                baseline = _baseline_from_box(top, bottom, size_hint)
+                collected.append((top, bottom, baseline, text))
+
+        return collected
+
+    @staticmethod
+    def _pick_bottommost_footer_line(
+        lines: List[Tuple[float, float, float, str]],
+    ) -> Optional[Tuple[float, float, float, str]]:
+        """
+        Return the bottom-most line in a footer cluster.
+
+        Lines are ordered by ``top`` (distance from page top). Starting from the
+        lowest line, walk upward while gaps stay within a footer-like spacing so
+        a taller glyph box on the upper footer row cannot win over a lower row.
+        """
+        if not lines:
+            return None
+
+        # Bottom-most first (largest top = further down the page).
+        ordered = sorted(lines, key=lambda item: item[0], reverse=True)
+        heights = [max(1.0, bottom - top) for top, bottom, _, _ in ordered]
+        median_height = sorted(heights)[len(heights) // 2]
+        max_gap = max(14.0, median_height * 2.5)
+
+        cluster = [ordered[0]]
+        for candidate in ordered[1:]:
+            gap = cluster[-1][0] - candidate[0]
+            if gap > max_gap:
+                break
+            cluster.append(candidate)
+
+        # Bottom-most member of the contiguous footer cluster.
+        return cluster[0]
+
     def detect_footer_last_line(
         self,
         pdf_path: str,
         *,
         bottom_band_fraction: float = 0.20,
+        page_sample_radius: int = 2,
     ) -> Optional[FooterLineHint]:
         """
-        Estimate the Y of the last footer line from the middle page of a PDF.
+        Estimate the baseline Y of the last footer line near the middle pages.
 
-        Uses pdfplumber text positions in the bottom band of the page (same
-        coordinate space as stamping). Returns None when no footer-like text
-        is found.
+        Uses pdfplumber text positions in the bottom band (same coordinate space
+        as stamping). Samples several pages and takes the median baseline so a
+        single low outlier (or padded line box) does not pull the stamp below the
+        visible footer text. Returns None when no footer-like text is found.
         """
         try:
             import pdfplumber
@@ -174,42 +282,56 @@ class PDFProcessor:
             with pdfplumber.open(pdf_path) as pdf:
                 if not pdf.pages:
                     return None
-                page_index = len(pdf.pages) // 2
-                page = pdf.pages[page_index]
-                height = float(page.height or 0.0)
-                width = float(page.width or 0.0)
-                if height <= 0:
+
+                page_count = len(pdf.pages)
+                middle = page_count // 2
+                radius = max(0, int(page_sample_radius))
+                sample_indexes = sorted(
+                    {
+                        max(0, min(page_count - 1, middle + offset))
+                        for offset in range(-radius, radius + 1)
+                    }
+                )
+
+                # (baseline_y_from_bottom, page_index, height, width, sample)
+                candidates: List[Tuple[float, int, float, float, str]] = []
+
+                for page_index in sample_indexes:
+                    page = pdf.pages[page_index]
+                    height = float(page.height or 0.0)
+                    width = float(page.width or 0.0)
+                    if height <= 0:
+                        continue
+
+                    lines = self._footer_lines_from_page(
+                        page, bottom_band_fraction=bottom_band_fraction
+                    )
+                    chosen = self._pick_bottommost_footer_line(lines)
+                    if chosen is None:
+                        continue
+
+                    _line_top, _line_bottom, baseline_from_top, sample = chosen
+                    y_from_bottom = max(0.0, height - baseline_from_top)
+                    if len(sample) > 48:
+                        sample = sample[:45] + "..."
+                    candidates.append(
+                        (y_from_bottom, page_index, height, width, sample)
+                    )
+
+                if not candidates:
                     return None
 
-                words = page.extract_words() or []
-                if not words:
-                    return None
-
-                band_top = height * (1.0 - max(0.05, min(0.45, bottom_band_fraction)))
-                footer_words = [
-                    word for word in words if float(word.get("top", 0.0)) >= band_top
+                # Median baseline across sampled pages (stable vs min/max outliers).
+                candidates.sort(key=lambda item: item[0])
+                best = candidates[len(candidates) // 2]
+                # Prefer a longer sample text on the chosen baseline when ties exist.
+                y_target = best[0]
+                same_y = [
+                    item for item in candidates if abs(item[0] - y_target) < 1.0
                 ]
-                if not footer_words:
-                    # No text in the footer band — treat as no footer.
-                    return None
+                best = max(same_y, key=lambda item: len(item[4]))
 
-                lines = _group_words_into_lines(footer_words)
-                if not lines:
-                    return None
-
-                last_line = max(
-                    lines,
-                    key=lambda line: max(float(word["bottom"]) for word in line),
-                )
-                line_bottom = max(float(word["bottom"]) for word in last_line)
-                y_from_bottom = max(0.0, height - line_bottom)
-                sample = " ".join(
-                    word["text"]
-                    for word in sorted(last_line, key=lambda item: float(item["x0"]))
-                )
-                if len(sample) > 48:
-                    sample = sample[:45] + "..."
-
+                y_from_bottom, page_index, height, width, sample = best
                 return FooterLineHint(
                     page_number=page_index + 1,
                     page_height_pt=height,
@@ -254,8 +376,10 @@ class PDFProcessor:
         """
         Convert a glyph-box bottom Y (from page bottom) into a baseline Y.
 
-        Page numbers are drawn on the baseline, so this is the Y to use for
-        aligning with the measured footer line when using ``font_name``/size.
+        When ``detect_footer_last_line`` already returns a baseline estimate,
+        pass that value through unchanged by using font_size <= 0, or call the
+        hint's ``y_from_bottom_pt`` directly. This helper remains for callers
+        that measured a glyph-box bottom.
         """
         descent = self.estimate_font_descent_pt(font_name, font_size)
         return max(0.0, float(glyph_bottom_y_from_bottom_pt) + descent)
@@ -515,6 +639,52 @@ class PDFProcessor:
         else:
             return 0
     
+    def page_dimensions(
+        self, file_path: str, page_numbers: Optional[List[int]] = None
+    ) -> List[Tuple[float, float, int]]:
+        """
+        Read ``(width_pt, height_pt, rotation)`` for pages of a PDF or Word file.
+        
+        Args:
+            file_path: Path to a PDF, or a Word document (converted, cached)
+            page_numbers: Optional 1-based page numbers to limit the result;
+                          ``None`` reads every page
+            
+        Returns:
+            One media-box size and /Rotate value per page, in document order.
+            Empty when the file cannot be read.
+        """
+        file_ext = Path(file_path).suffix.lower()
+        if file_ext in ['.docx', '.doc']:
+            try:
+                pdf_path = self.convert_word_to_pdf(file_path)
+            except Exception:
+                return []
+        elif file_ext == '.pdf':
+            pdf_path = file_path
+        else:
+            return []
+        
+        try:
+            reader = PdfReader(pdf_path, strict=False)
+            pages = reader.pages
+            if page_numbers is None:
+                selected = range(len(pages))
+            else:
+                selected = [
+                    number - 1
+                    for number in page_numbers
+                    if 1 <= number <= len(pages)
+                ]
+            dimensions: List[Tuple[float, float, int]] = []
+            for index in selected:
+                page = pages[index]
+                width, height = self._get_page_mediabox_size(page)
+                dimensions.append((width, height, self._get_page_rotation(page)))
+            return dimensions
+        except Exception:
+            return []
+    
     def add_buffer_pages(self, pdf_path: str, num_pages: int, output_path: Optional[str] = None) -> str:
         """
         Add buffer (blank) pages to a PDF.
@@ -764,11 +934,21 @@ class PDFProcessor:
         """
         Resolve preset/absolute position to PDF user-space coordinates.
 
-        X/Y offsets are measured inward from ``settings.position_origin``.
+        When ``settings.x_frac`` / ``y_frac`` are set, they are fractions of the
+        display page size (bottom-left origin) and take priority — used by Swapper
+        to reuse a stamp location detected on the source page.
+
+        Otherwise X/Y offsets are measured inward from ``settings.position_origin``.
         """
         display_w, display_h = self._get_display_dimensions(
             width, height, page_rotation
         )
+        if settings.x_frac is not None and settings.y_frac is not None:
+            visual_x = float(settings.x_frac) * display_w
+            visual_y = float(settings.y_frac) * display_h
+            return self._visual_to_user_point(
+                visual_x, visual_y, width, height, page_rotation
+            )
         if settings.position_mode == POSITION_ABSOLUTE:
             offset_x = settings.x_cm * CM_TO_POINTS
             offset_y = settings.y_cm * CM_TO_POINTS
@@ -785,6 +965,26 @@ class PDFProcessor:
         return self._visual_to_user_point(
             visual_x, visual_y, width, height, page_rotation
         )
+    
+    def _settings_for_page(
+        self,
+        width: float,
+        height: float,
+        page_rotation: int,
+        default_settings: PageNumberSettings,
+        settings_by_page_type: Optional[Dict[PageType, PageNumberSettings]],
+    ) -> PageNumberSettings:
+        """
+        Pick the settings configured for this page's size and orientation.
+        
+        Falls back to ``default_settings`` when no per-type overrides are given
+        or the page's type was not configured (e.g. a size that appeared only
+        after merging).
+        """
+        if not settings_by_page_type:
+            return default_settings
+        page_type = classify_page(width, height, page_rotation)
+        return settings_by_page_type.get(page_type, default_settings)
     
     def _merge_stamp_on_top(
         self,
@@ -894,8 +1094,9 @@ class PDFProcessor:
         
         Offsets are measured inward from ``settings.position_origin``, then mapped
         to viewer coordinates (bottom-left, x right, y up) after /Rotate. Text is
-        rotated so it reads upright on screen. An optional filled white rectangle
-        may be drawn behind the text.
+        rotated so it reads upright on screen.         An optional filled background rectangle may be drawn behind the text
+        (white, or ``settings.background_color_rgb`` when set). Font colour is
+        unchanged by the background.
         """
         rl_font = self._register_reportlab_font(settings.font_name or DEFAULT_FONT)
         font_size = max(0.1, settings.font_size)
@@ -926,7 +1127,11 @@ class PDFProcessor:
         else:
             box_left = -pad_x
 
-        if settings.use_white_background:
+        if settings.background_color_rgb is not None:
+            br, bg, bb = settings.background_color_rgb
+            c.setFillColorRGB(br / 255.0, bg / 255.0, bb / 255.0)
+            c.rect(box_left, box_bottom, box_width, box_height, fill=1, stroke=0)
+        elif settings.use_white_background:
             c.setFillColor(white)
             c.setStrokeColor(white)
             c.rect(box_left, box_bottom, box_width, box_height, fill=1, stroke=0)
@@ -942,7 +1147,11 @@ class PDFProcessor:
         c.restoreState()
 
     def _create_page_number_watermark(
-        self, page_num: int, page, settings: PageNumberSettings
+        self,
+        page_num: int,
+        page,
+        settings: PageNumberSettings,
+        settings_by_page_type: Optional[Dict[PageType, PageNumberSettings]] = None,
     ) -> str:
         """
         Create a single-page PDF watermark with a page number for the given page.
@@ -950,12 +1159,17 @@ class PDFProcessor:
         Args:
             page_num: Page number to render
             page: PyPDF2 page object used for size and rotation
+            settings: Default settings when the page type has no override
+            settings_by_page_type: Optional per size/orientation position overrides
             
         Returns:
             Path to the temporary watermark PDF file
         """
         width, height = self._get_page_mediabox_size(page)
         page_rotation = self._get_page_rotation(page)
+        settings = self._settings_for_page(
+            width, height, page_rotation, settings, settings_by_page_type
+        )
         
         temp_watermark = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_watermark_path = temp_watermark.name
@@ -971,7 +1185,11 @@ class PDFProcessor:
         return temp_watermark_path
     
     def _apply_page_number_overlay(
-        self, page: PageObject, page_num: int, settings: PageNumberSettings
+        self,
+        page: PageObject,
+        page_num: int,
+        settings: PageNumberSettings,
+        settings_by_page_type: Optional[Dict[PageType, PageNumberSettings]] = None,
     ) -> None:
         """
         Stamp a page number onto a page as the topmost content layer.
@@ -979,8 +1197,12 @@ class PDFProcessor:
         Args:
             page: Target page (must already belong to a PdfWriter)
             page_num: Page number to display
+            settings: Default settings when the page type has no override
+            settings_by_page_type: Optional per size/orientation position overrides
         """
-        temp_watermark_path = self._create_page_number_watermark(page_num, page, settings)
+        temp_watermark_path = self._create_page_number_watermark(
+            page_num, page, settings, settings_by_page_type
+        )
         
         try:
             stamp_page = PdfReader(temp_watermark_path, strict=False).pages[0]
@@ -1000,6 +1222,7 @@ class PDFProcessor:
         start_number: int = 1,
         settings: Optional[PageNumberSettings] = None,
         preserve_links: bool = True,
+        settings_by_page_type: Optional[Dict[PageType, PageNumberSettings]] = None,
     ) -> None:
         """
         Add page numbers to a PDF file.
@@ -1017,13 +1240,15 @@ class PDFProcessor:
             start_number: Starting page number (default: 1)
             settings: Page number formatting/position settings
             preserve_links: Keep interactive links and bookmarks (default: True)
+            settings_by_page_type: Optional overrides keyed by page size and
+                orientation; pages whose type is absent use ``settings``
         """
         if settings is None:
             settings = PageNumberSettings()
 
         if preserve_links:
             self._add_page_numbers_preserving_links(
-                pdf_path, output_path, start_number, settings
+                pdf_path, output_path, start_number, settings, settings_by_page_type
             )
             return
 
@@ -1033,7 +1258,9 @@ class PDFProcessor:
         for page_num, page in enumerate(reader.pages, start=start_number):
             writer.add_page(page)
             output_page = writer.pages[-1]
-            self._apply_page_number_overlay(output_page, page_num, settings)
+            self._apply_page_number_overlay(
+                output_page, page_num, settings, settings_by_page_type
+            )
 
         with open(output_path, "wb") as output_file:
             writer.write(output_file)
@@ -1044,6 +1271,7 @@ class PDFProcessor:
         output_path: str,
         start_number: int,
         settings: PageNumberSettings,
+        settings_by_page_type: Optional[Dict[PageType, PageNumberSettings]] = None,
     ) -> None:
         """Stamp page numbers with pikepdf overlays without rewriting the page tree."""
         try:
@@ -1061,15 +1289,18 @@ class PDFProcessor:
                 width = float(mediabox[2] - mediabox[0])
                 height = float(mediabox[3] - mediabox[1])
                 rotation = int(page.get("/Rotate", 0) or 0) % 360
+                page_settings = self._settings_for_page(
+                    width, height, rotation, settings, settings_by_page_type
+                )
 
                 temp_watermark_path = tempfile.NamedTemporaryFile(
                     delete=False, suffix=".pdf"
                 ).name
                 try:
                     c = canvas.Canvas(temp_watermark_path, pagesize=(width, height))
-                    text = settings.format_number(page_num)
+                    text = page_settings.format_number(page_num)
                     self._draw_page_number_on_canvas(
-                        c, text, width, height, settings, rotation
+                        c, text, width, height, page_settings, rotation
                     )
                     c.save()
 
@@ -1106,6 +1337,7 @@ class PDFProcessor:
         pre_converted_pdfs: Optional[Dict[str, str]] = None,
         page_number_settings: Optional[PageNumberSettings] = None,
         toc_info: Optional[TocInfo] = None,
+        settings_by_page_type: Optional[Dict[PageType, PageNumberSettings]] = None,
     ) -> None:
         """
         Process files using a main document with other files inserted at page boundaries.
@@ -1118,6 +1350,8 @@ class PDFProcessor:
             output_path: Path where the final PDF should be saved
             start_page_number: Starting page number for footer numbering
             pre_converted_pdfs: Optional map of Word paths to already-converted PDF paths
+            settings_by_page_type: Optional page-number settings per page size and
+                orientation, so mixed-format reports can be stamped differently
         """
         from backend.page_spec import parse_pages_spec
 
@@ -1195,6 +1429,7 @@ class PDFProcessor:
             start_page_number,
             page_number_settings,
             preserve_links=True,
+            settings_by_page_type=settings_by_page_type,
         )
 
         # Rebuild the PDF outline from the TOC so the sidebar bookmarks match

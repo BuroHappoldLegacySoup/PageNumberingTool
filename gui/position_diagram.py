@@ -31,6 +31,7 @@ class PositionDiagramWidget(QWidget):
         self._x_percent = 50.0
         self._y_percent = 5.0
         self._origin = DEFAULT_ORIGIN
+        self._aspect_ratio = 210.0 / 297.0
         self.setMinimumSize(120, 150)
         self.setMaximumSize(160, 190)
         self._update_tooltip()
@@ -52,16 +53,30 @@ class PositionDiagramWidget(QWidget):
         self._y_percent = max(0.0, min(100.0, y_percent))
         self.update()
 
+    def set_page_size(self, width: float, height: float) -> None:
+        """Shape the drawn page to a real width/height, so landscape looks landscape."""
+        if width <= 0 or height <= 0:
+            return
+        self._aspect_ratio = width / height
+        self.update()
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         margin = 8
-        w = self.width() - 2 * margin
-        h = self.height() - 2 * margin - 14
-        left = margin
-        top = margin + 12
+        available_w = self.width() - 2 * margin
+        available_h = self.height() - 2 * margin - 14
+
+        # Fit the page rectangle to its real aspect ratio, centred horizontally.
+        w = available_w
+        h = int(round(w / self._aspect_ratio)) if self._aspect_ratio > 0 else available_h
+        if h > available_h:
+            h = available_h
+            w = int(round(h * self._aspect_ratio))
+        left = margin + (available_w - w) // 2
+        top = margin + 12 + (available_h - h) // 2
         bottom = top + h
         right = left + w
 

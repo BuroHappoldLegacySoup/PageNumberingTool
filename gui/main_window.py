@@ -8,9 +8,9 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QFileDialog, QLabel, QSpinBox, QMessageBox, QGroupBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QRadioButton,
-    QButtonGroup, QCheckBox, QLineEdit, QComboBox, QSlider,
+    QButtonGroup, QCheckBox, QLineEdit, QComboBox,
     QDoubleSpinBox, QGridLayout, QFrame, QSizePolicy, QScrollArea,
-    QProgressDialog, QApplication, QDialog,
+    QProgressDialog, QApplication, QDialog, QTabWidget,
 )
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QColor, QFont, QDesktopServices
@@ -31,21 +31,24 @@ from backend.page_number_config import (
     PageNumberSettings,
     load_font_names,
     minimum_digits_for_page_count,
-    POSITION_PRESETS,
-    CUSTOM_POSITION,
-    DEFAULT_POSITION,
-    DEFAULT_ORIGIN,
     DEFAULT_FONT,
     DEFAULT_FONT_SIZE,
     DEFAULT_SEPARATOR,
-    POSITION_RELATIVE,
-    POSITION_ABSOLUTE,
-    ORIGIN_BOTTOM_RIGHT,
-    ORIGIN_TOP_RIGHT,
-    preset_anchor,
 )
+from backend.page_geometry import (
+    PageType,
+    PageTypeInfo,
+    page_type_from_key,
+    summarize_page_types,
+)
+from backend.page_spec import parse_pages_spec
 
-from gui.position_diagram import PositionDiagramWidget
+from gui.position_panel import (
+    A4_HEIGHT_CM,
+    A4_WIDTH_CM,
+    PositionSettingsPanel,
+)
+from gui.swapper_tab import SwapperTab
 from gui.ui_helpers import (
     add_form_row,
     configure_compact_grid,
@@ -60,13 +63,12 @@ from backend.session_manager import (
     build_session_filename,
     save_session,
     load_session,
+    inserter_section,
+    swapper_section,
     windows_username,
+    primary_action_button_style,
 )
 from backend.toc_handler import TocInfo, extract_toc
-
-A4_WIDTH_CM = 21.0
-A4_HEIGHT_CM = 29.7
-
 
 # Pantone 382C - Lime Green (RGB: 206, 220, 0)
 LIME_GREEN = QColor(206, 220, 0)
@@ -97,17 +99,20 @@ class MainWindow(QMainWindow):
         self.toc_info: Optional[TocInfo] = None
         self._toc_main_path: Optional[str] = None
         self._insert_controls: Dict[str, Tuple[QComboBox, QSpinBox]] = {}
-        self._position_sync_from_preset = False
-        self._position_origin: str = DEFAULT_ORIGIN
         self._footer_hint: Optional[FooterLineHint] = None
         self._current_session_path: Optional[Path] = initial_session_path
+        # Detected page sizes/orientations across the assembled document, and one
+        # position panel per detected type (a single type means no tabs).
+        self._page_types: List[PageTypeInfo] = []
+        self._position_panels: Dict[PageType, PositionSettingsPanel] = {}
+        self._single_position_panel: Optional[PositionSettingsPanel] = None
+        self._page_dimension_cache: Dict[str, List[Tuple[float, float, int]]] = {}
         
         self.setWindowTitle("The Reportinator")
         self.setGeometry(100, 100, 1100, 820)
         
         self._setup_ui()
         self._apply_lime_green_styling()
-        self.position_diagram.set_origin(self._position_origin)
         if initial_session_path is not None:
             self._load_session_file(initial_session_path)
     
@@ -115,6 +120,14 @@ class MainWindow(QMainWindow):
         """
         Set up the user interface components.
         """
+        tabs = QTabWidget()
+        tabs.addTab(self._create_inserter_tab(), "Insert 📥")
+        self.swapper_tab = SwapperTab(self)
+        tabs.addTab(self.swapper_tab, "Swap 🔄️ / Add ➕ ")
+        self.setCentralWidget(tabs)
+
+    def _create_inserter_tab(self) -> QWidget:
+        """Build the original insert / page-numbering workflow as a tab page."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -144,7 +157,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.status_label)
 
         scroll.setWidget(content)
-        self.setCentralWidget(scroll)
+        return scroll
     
     def _create_file_section(self) -> QGroupBox:
         """
@@ -313,94 +326,19 @@ class MainWindow(QMainWindow):
         grid.addWidget(font_widget, row, 0, 1, 3)
         row += 1
 
-        self.relative_position_radio = QRadioButton("Relative (%)")
-        self.absolute_position_radio = QRadioButton("Absolute (cm)")
-        self.relative_position_radio.setChecked(True)
-        self._position_mode_group = QButtonGroup(self)
-        self._position_mode_group.addButton(self.relative_position_radio)
-        self._position_mode_group.addButton(self.absolute_position_radio)
-        self.relative_position_radio.toggled.connect(self._on_position_mode_changed)
-
         location_block = QHBoxLayout()
         location_block.setSpacing(12)
-        location_block.addWidget(self.relative_position_radio)
-        location_block.addWidget(self.absolute_position_radio)
 
-        loc_controls = QVBoxLayout()
-        loc_controls.setSpacing(6)
-        self.position_combo = prepare_combo_box(QComboBox(), 160)
-        preset_names = list(POSITION_PRESETS.keys()) + [CUSTOM_POSITION]
-        self.position_combo.addItems(preset_names)
-        self.position_combo.setCurrentText(DEFAULT_POSITION)
-        self.position_combo.currentTextChanged.connect(self._on_position_preset_changed)
-        loc_controls.addWidget(self.position_combo)
+        # One position panel per detected page type. Panels (and the tab bar that
+        # holds them when there is more than one) are built by
+        # _rebuild_position_panels once page sizes are known.
+        self.position_panels_container = QWidget()
+        self._position_panels_layout = QVBoxLayout(self.position_panels_container)
+        self._position_panels_layout.setContentsMargins(0, 0, 0, 0)
+        self._position_panels_layout.setSpacing(0)
+        self.position_tabs: Optional[QTabWidget] = None
+        location_block.addWidget(self.position_panels_container, stretch=1)
 
-        slider_col = QVBoxLayout()
-        slider_col.setSpacing(4)
-        x_row = QHBoxLayout()
-        x_row.setSpacing(6)
-        x_row.addWidget(QLabel("X %:"))
-        self.x_slider = QSlider(Qt.Orientation.Horizontal)
-        self.x_slider.setRange(0, 100)
-        self.x_slider.setValue(50)
-        self.x_slider.setMinimumWidth(160)
-        self.x_slider.valueChanged.connect(self._on_position_slider_changed)
-        self.x_value_label = QLabel("50")
-        self.x_value_label.setMinimumWidth(28)
-        x_row.addWidget(self.x_slider, stretch=1)
-        x_row.addWidget(self.x_value_label)
-        slider_col.addLayout(x_row)
-
-        y_row = QHBoxLayout()
-        y_row.setSpacing(6)
-        y_row.addWidget(QLabel("Y %:"))
-        self.y_slider = QSlider(Qt.Orientation.Horizontal)
-        self.y_slider.setRange(0, 100)
-        self.y_slider.setValue(5)
-        self.y_slider.setMinimumWidth(160)
-        self.y_slider.valueChanged.connect(self._on_position_slider_changed)
-        self.y_value_label = QLabel("5")
-        self.y_value_label.setMinimumWidth(28)
-        y_row.addWidget(self.y_slider, stretch=1)
-        y_row.addWidget(self.y_value_label)
-        slider_col.addLayout(y_row)
-
-        abs_col = QVBoxLayout()
-        abs_col.setSpacing(4)
-        abs_x_row = QHBoxLayout()
-        abs_x_row.setSpacing(6)
-        abs_x_row.addWidget(QLabel("X (cm):"))
-        self.x_cm_spinbox = prepare_double_spinbox(QDoubleSpinBox(), 88)
-        self.x_cm_spinbox.setDecimals(2)
-        self.x_cm_spinbox.setMinimum(0.0)
-        self.x_cm_spinbox.setMaximum(999.99)
-        self.x_cm_spinbox.setValue(A4_WIDTH_CM * 0.5)
-        self.x_cm_spinbox.valueChanged.connect(self._on_absolute_position_changed)
-        abs_x_row.addWidget(self.x_cm_spinbox)
-        abs_col.addLayout(abs_x_row)
-
-        abs_y_row = QHBoxLayout()
-        abs_y_row.setSpacing(6)
-        abs_y_row.addWidget(QLabel("Y (cm):"))
-        self.y_cm_spinbox = prepare_double_spinbox(QDoubleSpinBox(), 88)
-        self.y_cm_spinbox.setDecimals(2)
-        self.y_cm_spinbox.setMinimum(0.0)
-        self.y_cm_spinbox.setMaximum(999.99)
-        self.y_cm_spinbox.setValue(A4_HEIGHT_CM * 0.05)
-        self.y_cm_spinbox.valueChanged.connect(self._on_absolute_position_changed)
-        abs_y_row.addWidget(self.y_cm_spinbox)
-        abs_col.addLayout(abs_y_row)
-
-        self._relative_position_widget = QWidget()
-        self._relative_position_widget.setLayout(slider_col)
-        self._absolute_position_widget = QWidget()
-        self._absolute_position_widget.setLayout(abs_col)
-        loc_controls.addWidget(self._relative_position_widget)
-        loc_controls.addWidget(self._absolute_position_widget)
-        self._absolute_position_widget.hide()
-        location_block.addLayout(loc_controls, stretch=1)
-
-        self.position_diagram = PositionDiagramWidget()
         self.footer_hint_label = QLabel(
             "Footer Y: load a main document to estimate the last footer line."
         )
@@ -411,11 +349,19 @@ class MainWindow(QMainWindow):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
         self.footer_hint_label.setStyleSheet("color: #555; font-size: 11px;")
-        diagram_row = QHBoxLayout()
-        diagram_row.setSpacing(8)
-        diagram_row.addWidget(self.position_diagram)
-        diagram_row.addWidget(self.footer_hint_label, stretch=1)
-        location_block.addLayout(diagram_row)
+        self.apply_footer_y_btn = QPushButton("Use bottom footer Y")
+        self.apply_footer_y_btn.setToolTip(
+            "Set absolute Y to the baseline of the lowest detected footer line."
+        )
+        self.apply_footer_y_btn.setEnabled(False)
+        self.apply_footer_y_btn.clicked.connect(self._apply_footer_hint_y)
+        footer_hint_col = QVBoxLayout()
+        footer_hint_col.setSpacing(4)
+        footer_hint_col.setContentsMargins(0, 0, 0, 0)
+        footer_hint_col.addWidget(self.footer_hint_label)
+        footer_hint_col.addWidget(self.apply_footer_y_btn)
+        footer_hint_col.addStretch()
+        location_block.addLayout(footer_hint_col)
 
         location_widget = QWidget()
         location_widget.setLayout(location_block)
@@ -441,7 +387,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(preview_frame)
 
         group.setLayout(outer)
-        self._apply_position_preset(DEFAULT_POSITION)
+        self._rebuild_position_panels()
         self._update_numbering_preview()
         return group
 
@@ -460,69 +406,192 @@ class MainWindow(QMainWindow):
         self.custom_label_edit.setEnabled(custom_on)
         self._on_numbering_option_changed()
 
-    def _on_position_mode_changed(self) -> None:
-        relative = self.relative_position_radio.isChecked()
-        self._relative_position_widget.setVisible(relative)
-        self._absolute_position_widget.setVisible(not relative)
-        self.position_combo.setEnabled(relative)
-        self.x_slider.setEnabled(relative)
-        self.y_slider.setEnabled(relative)
-        if relative:
-            self._sync_diagram_from_relative()
+    # ------------------------------------------------- page types and panels
+
+    def _document_page_dimensions(self) -> List[Tuple[float, float, int]]:
+        """
+        Collect (width, height, rotation) for every page of the assembled output.
+
+        Insert files contribute only the pages their split spec selects, so a
+        page size that is present in a source PDF but never inserted does not
+        create a tab nobody needs.
+        """
+        dimensions: List[Tuple[float, float, int]] = []
+        if not self.main_file_path:
+            return dimensions
+
+        dimensions.extend(self._file_page_dimensions(self.main_file_path))
+        for segment in self.insertions:
+            page_dims = self._file_page_dimensions(segment.file_path)
+            if not page_dims:
+                continue
+            spec = (segment.pages_spec or "").strip()
+            if not spec:
+                dimensions.extend(page_dims)
+                continue
+            for page_number in parse_pages_spec(spec, len(page_dims)):
+                if 1 <= page_number <= len(page_dims):
+                    dimensions.append(page_dims[page_number - 1])
+        return dimensions
+
+    def _file_page_dimensions(self, file_path: str) -> List[Tuple[float, float, int]]:
+        """Page dimensions for one source file, cached per path."""
+        cached = self._page_dimension_cache.get(file_path)
+        if cached is not None:
+            return cached
+        dimensions = self.pdf_processor.page_dimensions(file_path)
+        self._page_dimension_cache[file_path] = dimensions
+        return dimensions
+
+    def _refresh_page_types(self) -> None:
+        """Re-detect page types from the current file set and rebuild the panels."""
+        self._page_types = summarize_page_types(self._document_page_dimensions())
+        self._rebuild_position_panels()
+
+    def _rebuild_position_panels(self) -> None:
+        """
+        Show one position panel per detected page type.
+
+        A single page type (or none detected yet) keeps the plain inline layout;
+        two or more add a tab per type. Settings already entered for a type are
+        carried over so re-detection does not discard the user's work.
+        """
+        saved = {
+            page_type: panel.to_dict()
+            for page_type, panel in self._position_panels.items()
+        }
+        active_label = ""
+        if self.position_tabs is not None and self.position_tabs.count():
+            active_label = self.position_tabs.tabText(self.position_tabs.currentIndex())
+
+        self._clear_position_panels()
+
+        page_types = self._page_types
+        if len(page_types) <= 1:
+            info = page_types[0] if page_types else None
+            panel = self._create_position_panel(info, saved)
+            self._position_panels_layout.addWidget(panel)
+            if info is not None:
+                self._position_panels[info.page_type] = panel
+                panel.set_page_size_caption(
+                    f"{info.label} — {info.width_cm:.1f} × {info.height_cm:.1f} cm"
+                )
+            self._single_position_panel = panel
+            self._update_numbering_preview()
+            return
+
+        self._single_position_panel = None
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        for info in page_types:
+            panel = self._create_position_panel(info, saved)
+            panel.set_page_size_caption(
+                f"{info.width_cm:.1f} × {info.height_cm:.1f} cm — "
+                f"{info.page_count} page(s)"
+            )
+            self._position_panels[info.page_type] = panel
+            tabs.addTab(panel, info.label)
+        index = 0
+        for tab_index in range(tabs.count()):
+            if tabs.tabText(tab_index) == active_label:
+                index = tab_index
+                break
+        tabs.setCurrentIndex(index)
+        tabs.currentChanged.connect(lambda _index: self._on_numbering_option_changed())
+        self.position_tabs = tabs
+        self._position_panels_layout.addWidget(tabs)
+        self._update_numbering_preview()
+
+    def _create_position_panel(
+        self,
+        info: Optional[PageTypeInfo],
+        saved: Dict[PageType, Dict[str, Any]],
+    ) -> PositionSettingsPanel:
+        """Build a panel for one page type, restoring any settings it already had."""
+        if info is not None:
+            panel = PositionSettingsPanel(info.width_cm, info.height_cm)
         else:
-            self._sync_diagram_from_absolute()
-        self._on_numbering_option_changed()
+            panel = PositionSettingsPanel(A4_WIDTH_CM, A4_HEIGHT_CM)
 
-    def _on_absolute_position_changed(self) -> None:
-        if not self._position_sync_from_preset:
-            x_cm = self.x_cm_spinbox.value()
-            y_cm = self.y_cm_spinbox.value()
-            x_pct, y_pct = self._cm_to_percent(x_cm, y_cm)
-            self.x_slider.blockSignals(True)
-            self.y_slider.blockSignals(True)
-            self.x_slider.setValue(int(round(x_pct)))
-            self.y_slider.setValue(int(round(y_pct)))
-            self.x_slider.blockSignals(False)
-            self.y_slider.blockSignals(False)
-            self._update_position_labels()
-            self.position_combo.blockSignals(True)
-            self.position_combo.setCurrentText(CUSTOM_POSITION)
-            self.position_combo.blockSignals(False)
-        self._sync_diagram_from_absolute()
-        self._on_numbering_option_changed()
+        previous = saved.get(info.page_type) if info is not None else None
+        if previous is None and len(saved) == 1:
+            # Carrying the only existing configuration forward keeps a freshly
+            # detected type from resetting what the user just set up.
+            previous = next(iter(saved.values()))
+        if previous is not None:
+            panel.load_dict(previous)
 
-    def _sync_diagram_from_relative(self) -> None:
-        self.position_diagram.set_origin(self._position_origin)
-        self.position_diagram.set_position(
-            float(self.x_slider.value()), float(self.y_slider.value())
-        )
+        panel.changed.connect(self._on_numbering_option_changed)
+        return panel
 
-    def _sync_diagram_from_absolute(self) -> None:
-        x_pct = (self.x_cm_spinbox.value() / A4_WIDTH_CM) * 100.0
-        y_pct = (self.y_cm_spinbox.value() / A4_HEIGHT_CM) * 100.0
-        self.position_diagram.set_origin(self._position_origin)
-        self.position_diagram.set_position(x_pct, y_pct)
+    def _clear_position_panels(self) -> None:
+        """Detach and delete the current panels/tab bar."""
+        self._position_panels.clear()
+        self.position_tabs = None
+        self._single_position_panel = None
+        while self._position_panels_layout.count():
+            item = self._position_panels_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
 
-    def _percent_to_cm(self, x_pct: float, y_pct: float) -> Tuple[float, float]:
-        return (x_pct / 100.0 * A4_WIDTH_CM, y_pct / 100.0 * A4_HEIGHT_CM)
+    def _active_position_panel(self) -> PositionSettingsPanel:
+        """The panel the user is currently looking at (drives the live preview)."""
+        if self.position_tabs is not None:
+            current = self.position_tabs.currentWidget()
+            if isinstance(current, PositionSettingsPanel):
+                return current
+        if self._single_position_panel is None:
+            # Panels are built during UI setup; this only guards earlier access.
+            self._single_position_panel = PositionSettingsPanel(
+                A4_WIDTH_CM, A4_HEIGHT_CM
+            )
+        return self._single_position_panel
 
-    def _cm_to_percent(self, x_cm: float, y_cm: float) -> Tuple[float, float]:
-        return (x_cm / A4_WIDTH_CM * 100.0, y_cm / A4_HEIGHT_CM * 100.0)
+    def _position_panels_in_order(self) -> List[PositionSettingsPanel]:
+        """Every position panel currently shown."""
+        if self.position_tabs is not None:
+            return [
+                widget
+                for widget in (
+                    self.position_tabs.widget(index)
+                    for index in range(self.position_tabs.count())
+                )
+                if isinstance(widget, PositionSettingsPanel)
+            ]
+        return [self._active_position_panel()]
 
-    def _set_position_origin(self, origin: str) -> None:
-        self._position_origin = origin
-        self.position_diagram.set_origin(origin)
+    def _footer_baseline_from_hint(self) -> Optional[Tuple[float, float, float]]:
+        """
+        Baseline Y for the detected footer line.
+
+        Returns (baseline_pt, baseline_cm, baseline_pct) or None.
+        ``detect_footer_last_line`` already returns a baseline estimate.
+        """
+        hint = self._footer_hint
+        if hint is None:
+            return None
+        baseline_pt = float(hint.y_from_bottom_pt)
+        baseline_cm = baseline_pt * (2.54 / 72.0)
+        if hint.page_height_pt > 0:
+            baseline_pct = (baseline_pt / hint.page_height_pt) * 100.0
+        else:
+            baseline_pct = 0.0
+        return baseline_pt, baseline_cm, baseline_pct
 
     def _update_footer_hint_label(self) -> None:
         """Refresh the footer Y hint shown beside the position diagram."""
         hint = self._footer_hint
         if hint is None:
+            self.apply_footer_y_btn.setEnabled(False)
             if self.main_file_path:
                 self.footer_hint_label.setText(
-                    "Footer Y: no footer text found on the middle page."
+                    "Footer Y: no footer text found near the middle of the document."
                 )
                 self.footer_hint_label.setToolTip(
-                    "Checked the bottom band of the middle page of the converted PDF."
+                    "Checked the bottom band of several pages around the middle "
+                    "of the converted PDF."
                 )
             else:
                 self.footer_hint_label.setText(
@@ -531,36 +600,43 @@ class MainWindow(QMainWindow):
                 self.footer_hint_label.setToolTip("")
             return
 
-        font_name = self.font_combo.currentText()
-        font_size = float(self.font_size_spinbox.value())
-        baseline_pt = self.pdf_processor.estimate_baseline_y_from_bottom_pt(
-            hint.y_from_bottom_pt,
-            font_name,
-            font_size,
-        )
-        descent_pt = self.pdf_processor.estimate_font_descent_pt(font_name, font_size)
-        baseline_cm = baseline_pt * (2.54 / 72.0)
-        if hint.page_height_pt > 0:
-            baseline_pct = (baseline_pt / hint.page_height_pt) * 100.0
-        else:
-            baseline_pct = 0.0
+        baseline = self._footer_baseline_from_hint()
+        if baseline is None:
+            self.apply_footer_y_btn.setEnabled(False)
+            return
+        baseline_pt, baseline_cm, baseline_pct = baseline
 
+        sample_line = ""
+        if hint.sample_text:
+            sample_line = f"\n“{hint.sample_text}”"
         text = (
-            f"Footer baseline (page {hint.page_number}):\n"
+            f"Bottom footer line (page {hint.page_number}):\n"
             f"Y ≈ {baseline_cm:.2f} cm ({baseline_pct:.1f}%) from bottom"
+            f"{sample_line}"
         )
         self.footer_hint_label.setText(text)
         tip_parts = [
-            "Glyph-box bottom of the last footer line, plus estimated descent "
-            "for the selected page-number font/size (page numbers are drawn on "
-            "the baseline).",
-            f"Box bottom: {hint.y_from_bottom_cm:.2f} cm / {hint.y_from_bottom_percent:.1f}%",
-            f"Descent ({font_name} {font_size:g} pt): {descent_pt:.2f} pt",
+            "Estimated baseline of the lowest footer line (median across pages "
+            "near the middle). Use this as the stamp Y so page numbers sit on "
+            "that line.",
             f"Baseline Y: {baseline_cm:.2f} cm / {baseline_pct:.1f}% / {baseline_pt:.1f} pt",
         ]
+        if len(self._page_types) > 1:
+            tip_parts.append(
+                "Sampled from the main document; applies to the selected page-type tab."
+            )
         if hint.sample_text:
             tip_parts.append(f"Sample: “{hint.sample_text}”")
         self.footer_hint_label.setToolTip("\n".join(tip_parts))
+        self.apply_footer_y_btn.setEnabled(True)
+
+    def _apply_footer_hint_y(self) -> None:
+        """Apply the detected bottom-footer baseline to the visible page type."""
+        baseline = self._footer_baseline_from_hint()
+        if baseline is None:
+            return
+        _, baseline_cm, _ = baseline
+        self._active_position_panel().apply_absolute_y_cm(baseline_cm)
 
     def _update_color_swatch(self) -> None:
         r, g, b = self.color_r_spin.value(), self.color_g_spin.value(), self.color_b_spin.value()
@@ -583,58 +659,6 @@ class MainWindow(QMainWindow):
             self.color_b_spin.setValue(color.blue())
             self._update_color_swatch()
             self._on_numbering_option_changed()
-
-    def _on_position_preset_changed(self, name: str) -> None:
-        if name != CUSTOM_POSITION and name in POSITION_PRESETS:
-            self._position_sync_from_preset = True
-            x_pct, y_pct, _, origin = POSITION_PRESETS[name]
-            self._set_position_origin(origin)
-            self.x_slider.setValue(int(round(x_pct)))
-            self.y_slider.setValue(int(round(y_pct)))
-            x_cm, y_cm = self._percent_to_cm(x_pct, y_pct)
-            self.x_cm_spinbox.setValue(x_cm)
-            self.y_cm_spinbox.setValue(y_cm)
-            self._position_sync_from_preset = False
-            self._update_position_labels()
-            if self.relative_position_radio.isChecked():
-                self._sync_diagram_from_relative()
-            else:
-                self._sync_diagram_from_absolute()
-        self._on_numbering_option_changed()
-
-    def _on_position_slider_changed(self) -> None:
-        self._update_position_labels()
-        x = float(self.x_slider.value())
-        y = float(self.y_slider.value())
-        if not self._position_sync_from_preset:
-            x_cm, y_cm = self._percent_to_cm(x, y)
-            self.x_cm_spinbox.blockSignals(True)
-            self.y_cm_spinbox.blockSignals(True)
-            self.x_cm_spinbox.setValue(x_cm)
-            self.y_cm_spinbox.setValue(y_cm)
-            self.x_cm_spinbox.blockSignals(False)
-            self.y_cm_spinbox.blockSignals(False)
-            self.position_combo.blockSignals(True)
-            self.position_combo.setCurrentText(CUSTOM_POSITION)
-            self.position_combo.blockSignals(False)
-        self._sync_diagram_from_relative()
-        self._on_numbering_option_changed()
-
-    def _update_position_labels(self) -> None:
-        self.x_value_label.setText(str(self.x_slider.value()))
-        self.y_value_label.setText(str(self.y_slider.value()))
-
-    def _apply_position_preset(self, name: str) -> None:
-        if name in POSITION_PRESETS:
-            x_pct, y_pct, _, origin = POSITION_PRESETS[name]
-            self._set_position_origin(origin)
-            self.x_slider.setValue(int(round(x_pct)))
-            self.y_slider.setValue(int(round(y_pct)))
-            x_cm, y_cm = self._percent_to_cm(x_pct, y_pct)
-            self.x_cm_spinbox.setValue(x_cm)
-            self.y_cm_spinbox.setValue(y_cm)
-            self._sync_diagram_from_relative()
-            self._update_position_labels()
 
     def _get_total_page_count(self) -> int:
         if not self.main_file_path:
@@ -672,22 +696,6 @@ class MainWindow(QMainWindow):
         self.preview_label.setStyleSheet(f"color: rgb({r}, {g}, {b}); {bg_style}")
         self._update_color_swatch()
 
-    def _infer_text_anchor(self, x_percent: float, origin: Optional[str] = None) -> str:
-        """Infer left/center/right text anchor from X offset and origin corner."""
-        active_origin = origin if origin is not None else self._position_origin
-        from_right = active_origin in (ORIGIN_BOTTOM_RIGHT, ORIGIN_TOP_RIGHT)
-        if from_right:
-            if x_percent <= 20.0:
-                return "right"
-            if x_percent >= 80.0:
-                return "left"
-            return "center"
-        if x_percent <= 20.0:
-            return "left"
-        if x_percent >= 80.0:
-            return "right"
-        return "center"
-
     def _resolve_label_text(self) -> str:
         if self.seite_radio.isChecked():
             return "Seite"
@@ -695,23 +703,11 @@ class MainWindow(QMainWindow):
             return self.custom_label_edit.text().strip() or "Custom"
         return "Page"
 
-    def _get_page_number_settings(self) -> PageNumberSettings:
-        position_name = self.position_combo.currentText()
-        relative = self.relative_position_radio.isChecked()
-        x_pct = float(self.x_slider.value())
-        y_pct = float(self.y_slider.value())
-        x_cm = self.x_cm_spinbox.value()
-        y_cm = self.y_cm_spinbox.value()
-
-        if relative:
-            if position_name == CUSTOM_POSITION:
-                anchor = self._infer_text_anchor(x_pct)
-            else:
-                anchor = preset_anchor(position_name)
-        else:
-            x_pct_for_anchor, _ = self._cm_to_percent(x_cm, y_cm)
-            anchor = self._infer_text_anchor(x_pct_for_anchor)
-
+    def _settings_for_panel(
+        self, panel: PositionSettingsPanel
+    ) -> PageNumberSettings:
+        """Combine the shared numbering options with one panel's position."""
+        position = panel.values()
         sep = self.separator_edit.text()
         if not sep:
             sep = DEFAULT_SEPARATOR
@@ -722,14 +718,14 @@ class MainWindow(QMainWindow):
             chapter_prefix=self.chapter_prefix_edit.text(),
             num_digits=self.digits_spinbox.value(),
             separator=sep,
-            position_name=position_name,
-            position_mode=POSITION_RELATIVE if relative else POSITION_ABSOLUTE,
-            position_origin=self._position_origin,
-            x_percent=x_pct,
-            y_percent=y_pct,
-            x_cm=x_cm,
-            y_cm=y_cm,
-            text_anchor=anchor,
+            position_name=position.position_name,
+            position_mode=position.position_mode,
+            position_origin=position.position_origin,
+            x_percent=position.x_percent,
+            y_percent=position.y_percent,
+            x_cm=position.x_cm,
+            y_cm=position.y_cm,
+            text_anchor=position.text_anchor,
             font_name=self.font_combo.currentText(),
             font_size=self.font_size_spinbox.value(),
             font_color_rgb=(
@@ -740,6 +736,48 @@ class MainWindow(QMainWindow):
             suffix=self.suffix_edit.text(),
             use_white_background=self.white_background_checkbox.isChecked(),
         )
+
+    def _get_page_number_settings(self) -> PageNumberSettings:
+        """
+        Settings for the page type currently on screen.
+
+        Also used as the fallback for page types that were not detected before
+        processing (for example a size introduced by a late file swap).
+        """
+        return self._settings_for_panel(self._active_position_panel())
+
+    def _get_settings_by_page_type(self) -> Dict[PageType, PageNumberSettings]:
+        """Per-page-type settings for stamping; empty when only one type exists."""
+        if len(self._position_panels) <= 1:
+            return {}
+        return {
+            page_type: self._settings_for_panel(panel)
+            for page_type, panel in self._position_panels.items()
+        }
+
+    def _restore_position_settings(self, numbering: Dict[str, Any]) -> None:
+        """
+        Fill the position panels from a saved session.
+
+        Sessions saved before per-page-type positions existed only have the flat
+        position keys; those are applied to every panel so the old placement is
+        preserved for each detected size.
+        """
+        by_page_type = numbering.get("position_by_page_type")
+        if not isinstance(by_page_type, dict):
+            by_page_type = {}
+
+        saved_panels: Dict[PageType, Dict[str, Any]] = {}
+        for key, payload in by_page_type.items():
+            page_type = page_type_from_key(str(key))
+            if page_type is not None and isinstance(payload, dict):
+                saved_panels[page_type] = payload
+
+        for page_type, panel in self._position_panels.items():
+            panel.load_dict(saved_panels.get(page_type, numbering))
+
+        if not self._position_panels:
+            self._active_position_panel().load_dict(numbering)
 
     def _create_table_section(self) -> QGroupBox:
         """
@@ -790,13 +828,6 @@ class MainWindow(QMainWindow):
         self.total_pages_label = QLabel("Total Pages: 0")
         self.total_pages_label.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(self.total_pages_label)
-
-        session_row = QHBoxLayout()
-        save_session_btn = QPushButton("Save Session")
-        save_session_btn.clicked.connect(self._save_session)
-        session_row.addWidget(save_session_btn)
-        session_row.addStretch()
-        layout.addLayout(session_row)
         
         group.setLayout(layout)
         return group
@@ -848,6 +879,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.process_btn)
         
         layout.addStretch()
+
+        self.save_session_btn = QPushButton("Save Session")
+        self.save_session_btn.clicked.connect(self._save_session)
+        self.save_session_btn.setMinimumHeight(50)
+        self.save_session_btn.setMinimumWidth(250)
+        layout.addWidget(self.save_session_btn)
         
         return layout
     
@@ -866,27 +903,12 @@ class MainWindow(QMainWindow):
                 width: 18px;
             }}
         """)
-        self.process_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {lime_green_hex};
-                color: #000000;
-                font-weight: bold;
-                font-size: 14px;
-                border: 2px solid {lime_green_hex};
-                border-radius: 5px;
-                padding: 10px;
-            }}
-            QPushButton:hover {{
-                background-color: #B8C800;
-                border-color: #B8C800;
-            }}
-            QPushButton:disabled {{
-                background-color: #E0E0E0;
-                color: #808080;
-                border-color: #E0E0E0;
-            }}
-        """)
-    
+        primary = primary_action_button_style(lime_green_hex)
+        self.process_btn.setStyleSheet(primary)
+        self.save_session_btn.setStyleSheet(primary)
+        if hasattr(self, "swapper_tab") and self.swapper_tab is not None:
+            self.swapper_tab.apply_primary_button_style(primary)
+
     def _run_with_progress(
         self,
         title: str,
@@ -953,6 +975,7 @@ class MainWindow(QMainWindow):
                 return
             self.insertions.clear()
             self.page_counts.clear()
+            self._page_dimension_cache.clear()
 
         self.main_file_path = file_path
         self.toc_info = None
@@ -1009,6 +1032,7 @@ class MainWindow(QMainWindow):
         self._display_toc()
         self._refresh_table()
         self._update_total_pages()
+        self._refresh_page_types()
         self._update_process_button_state()
         entry_count = len(toc_info.entries) if toc_info else 0
         if entry_count:
@@ -1061,6 +1085,7 @@ class MainWindow(QMainWindow):
                     "The following files were not added:\n" + "\n".join(invalid_files),
                 )
 
+            self._refresh_page_types()
             self._update_process_button_state()
             self._update_status(f"Added {added} file(s) to insert")
 
@@ -1114,6 +1139,7 @@ class MainWindow(QMainWindow):
         self._apply_split_groups(file_path, groups, existing)
         self._refresh_table()
         self._update_total_pages()
+        self._refresh_page_types()
         self._update_status(
             f"Split {self.file_handler.get_file_name(file_path)} into {len(groups)} group(s)"
         )
@@ -1354,7 +1380,7 @@ class MainWindow(QMainWindow):
             title_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.toc_table.setItem(row, 1, title_item)
 
-            page_item = QTableWidgetItem(str(entry.page_number))
+            page_item = QTableWidgetItem(entry.display_page_label)
             page_item.setFlags(Qt.ItemFlag.NoItemFlags)
             page_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.toc_table.setItem(row, 2, page_item)
@@ -1523,9 +1549,13 @@ class MainWindow(QMainWindow):
         for path in list(self.page_counts.keys()):
             if path != self.main_file_path and path not in remaining_paths:
                 del self.page_counts[path]
+        for path in list(self._page_dimension_cache.keys()):
+            if path != self.main_file_path and path not in remaining_paths:
+                del self._page_dimension_cache[path]
 
         self._refresh_table()
         self._update_total_pages()
+        self._refresh_page_types()
         self._update_process_button_state()
         self._update_status(f"Removed {len(ids_to_remove)} row(s)")
     
@@ -1625,6 +1655,7 @@ class MainWindow(QMainWindow):
             
             self._update_status("Assembling document and adding page numbers...")
             page_settings = self._get_page_number_settings()
+            settings_by_page_type = self._get_settings_by_page_type()
 
             self.pdf_processor.process_files_with_main(
                 self.main_file_path,
@@ -1635,6 +1666,7 @@ class MainWindow(QMainWindow):
                 pre_converted_pdfs=pre_converted_pdfs,
                 page_number_settings=page_settings,
                 toc_info=self.toc_info,
+                settings_by_page_type=settings_by_page_type,
             )
 
             toc_note = ""
@@ -1684,10 +1716,9 @@ class MainWindow(QMainWindow):
             return "seite"
         return "page"
 
-    def _export_session_data(self) -> Dict[str, Any]:
+    def _export_inserter_session_data(self) -> Dict[str, Any]:
+        active_position = self._active_position_panel().to_dict()
         return {
-            "saved_at": datetime.now().isoformat(timespec="seconds"),
-            "username": windows_username(),
             "files": {
                 "main_file_path": self.main_file_path,
                 "insertions": [seg.to_dict() for seg in self.insertions],
@@ -1709,17 +1740,14 @@ class MainWindow(QMainWindow):
                 "separator": self.separator_edit.text(),
                 "suffix": self.suffix_edit.text(),
                 "use_white_background": self.white_background_checkbox.isChecked(),
-                "position_mode": (
-                    POSITION_RELATIVE
-                    if self.relative_position_radio.isChecked()
-                    else POSITION_ABSOLUTE
-                ),
-                "position_name": self.position_combo.currentText(),
-                "position_origin": self._position_origin,
-                "x_percent": self.x_slider.value(),
-                "y_percent": self.y_slider.value(),
-                "x_cm": self.x_cm_spinbox.value(),
-                "y_cm": self.y_cm_spinbox.value(),
+                # Flat position keys describe the visible page type, so older
+                # builds of the app can still read a usable position.
+                **active_position,
+                # One entry per detected page size/orientation.
+                "position_by_page_type": {
+                    page_type.key: panel.to_dict()
+                    for page_type, panel in self._position_panels.items()
+                },
                 "font_name": self.font_combo.currentText(),
                 "font_size": self.font_size_spinbox.value(),
                 "font_color_rgb": [
@@ -1730,15 +1758,43 @@ class MainWindow(QMainWindow):
             },
         }
 
+    def _export_session_data(self) -> Dict[str, Any]:
+        """Full session payload with separate Insert and Swap tab sections."""
+        swapper_data: Dict[str, Any] = {}
+        if hasattr(self, "swapper_tab") and self.swapper_tab is not None:
+            swapper_data = self.swapper_tab.export_session_data()
+        return {
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "username": windows_username(),
+            "inserter": self._export_inserter_session_data(),
+            "swapper": swapper_data,
+        }
+
     def _save_session(self) -> None:
-        """Save current UI state to a session JSON file."""
+        """Save Insert + Swap tab state to the same session JSON file."""
         try:
             folder = session_directory()
             if self._current_session_path is not None:
-                path = self._current_session_path
+                suggested = str(self._current_session_path)
             else:
-                filename = build_session_filename(self.main_file_path)
-                path = folder / filename
+                main_for_name = self.main_file_path
+                if not main_for_name and hasattr(self, "swapper_tab"):
+                    main_for_name = self.swapper_tab.main_file_path
+                suggested = str(folder / build_session_filename(main_for_name))
+
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Session",
+                suggested,
+                "Session Files (*.json)",
+            )
+            if not chosen:
+                return
+
+            path = Path(chosen)
+            if path.suffix.lower() != ".json":
+                path = path.with_suffix(".json")
+
             save_session(path, self._export_session_data())
             self._current_session_path = path
             self._update_status(f"Session saved: {path.name}")
@@ -1760,16 +1816,23 @@ class MainWindow(QMainWindow):
                 f"Could not load session:\n{path}\n\n{e}",
             )
             return
-        self._apply_session_data(data)
+        self._apply_session_data(inserter_section(data))
+        if hasattr(self, "swapper_tab") and self.swapper_tab is not None:
+            self.swapper_tab.apply_session_data(swapper_section(data))
         self._current_session_path = path
         self._update_status(f"Loaded session: {path.name}")
 
     def _apply_session_data(self, data: Dict[str, Any]) -> None:
         files = data.get("files", {})
         numbering = data.get("numbering", {})
+        if not isinstance(files, dict):
+            files = {}
+        if not isinstance(numbering, dict):
+            numbering = {}
 
         self.insertions.clear()
         self.page_counts.clear()
+        self._page_dimension_cache.clear()
         self.main_file_path = None
         self.toc_info = None
         self._toc_main_path = None
@@ -1902,27 +1965,6 @@ class MainWindow(QMainWindow):
             bool(numbering.get("use_white_background", False))
         )
 
-        if numbering.get("position_mode") == POSITION_ABSOLUTE:
-            self.absolute_position_radio.setChecked(True)
-        else:
-            self.relative_position_radio.setChecked(True)
-
-        pos_name = numbering.get("position_name", DEFAULT_POSITION)
-        if self.position_combo.findText(pos_name) >= 0:
-            self.position_combo.setCurrentText(pos_name)
-
-        # Named presets use current corner-relative defaults; Custom keeps saved offsets.
-        if pos_name == CUSTOM_POSITION or pos_name not in POSITION_PRESETS:
-            saved_origin = numbering.get("position_origin", DEFAULT_ORIGIN)
-            self._set_position_origin(str(saved_origin))
-            self.x_slider.setValue(int(numbering.get("x_percent", 50)))
-            self.y_slider.setValue(int(numbering.get("y_percent", 5)))
-            self.x_cm_spinbox.setValue(float(numbering.get("x_cm", A4_WIDTH_CM * 0.5)))
-            self.y_cm_spinbox.setValue(float(numbering.get("y_cm", A4_HEIGHT_CM * 0.05)))
-        elif pos_name in POSITION_PRESETS:
-            # Re-apply preset so origin and default margins match the current model.
-            self._apply_position_preset(pos_name)
-
         font_name = str(numbering.get("font_name", DEFAULT_FONT))
         if self.font_combo.findText(font_name) >= 0:
             self.font_combo.setCurrentText(font_name)
@@ -1934,8 +1976,9 @@ class MainWindow(QMainWindow):
             self.color_g_spin.setValue(int(rgb[1]))
             self.color_b_spin.setValue(int(rgb[2]))
 
-        self._on_position_mode_changed()
-        self._update_position_labels()
+        # Detect page types from the restored files first, then fill each panel.
+        self._refresh_page_types()
+        self._restore_position_settings(numbering)
         self._update_digits_minimum()
         self._update_numbering_preview()
         self._update_process_button_state()

@@ -62,6 +62,13 @@ class PageNumberSettings:
     font_color_rgb: Tuple[int, int, int] = (0, 0, 0)
     suffix: str = ""
     use_white_background: bool = False
+    # Optional RGB fill behind the stamp text (font colour unchanged).
+    # When set, takes priority over a plain white background box.
+    background_color_rgb: Optional[Tuple[int, int, int]] = None
+    # When both set (0–1 fractions of page width/height, bottom-left origin),
+    # drawing uses this anchor point instead of presets / cm offsets.
+    x_frac: Optional[float] = None
+    y_frac: Optional[float] = None
 
     def format_number(self, page_num: int) -> str:
         return format_page_number_text(

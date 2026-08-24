@@ -12,6 +12,7 @@ Typical use: start from a main Word/PDF body, insert appendices or chapter PDFs 
 - **Page-range splits** — split one PDF into groups (e.g. `1-4`, `5,6,7`) and insert each group at a different location
 - **Word → PDF** — converts `.doc` / `.docx` via Microsoft Word (Windows COM) before merging
 - **Flexible page numbers** — labels, chapter prefixes, digit padding, fonts, colours, relative or absolute position, white background option
+- **Mixed page sizes** — detects the page sizes and orientations in the uploaded files (e.g. A4 Portrait plus A3 Landscape) and gives each one its own position tab
 - **Table of contents** — extracts TOC from the main document; updates visible TOC page numbers when possible; rebuilds outline bookmarks to match post-insertion pages
 - **Sessions** — save/load work-in-progress (files, insert points, numbering options) under `~/The Reportinator`
 
@@ -79,7 +80,7 @@ flowchart TD
 1. **Session** — start fresh or resume a saved session.
 2. **Main document** — select the body (Word or PDF). The app converts Word once, caches the PDF, reads page count, extracts TOC, and samples footer position for numbering hints.
 3. **Insertions** — add PDFs/Word files. For each segment, choose *where* it goes (after a TOC chapter or a custom page number). Use **Split?** to place different page ranges of the same file at different locations.
-4. **Page numbering** — set label, prefix, digits, font, colour, and position (presets or custom % / cm from a chosen corner).
+4. **Page numbering** — set label, prefix, digits, font, colour, and position (presets or custom % / cm from a chosen corner). When the assembled document contains more than one page size or orientation, the position section splits into one tab per page type so each can be placed independently; a single page type keeps the plain inline controls.
 5. **Process** — pick an output path. The pipeline converts remaining Word files, merges the main document with insertions, updates TOC page numbers when possible, stamps page numbers (preserving links), and rebuilds PDF bookmarks from the TOC hierarchy.
 6. **Save session** (anytime) — stores paths, insert specs, and numbering options for later.
 
@@ -98,6 +99,7 @@ flowchart LR
     dialog[session_dialog]
     window[main_window]
     splitDlg[split_dialog]
+    posPanel[position_panel]
     helpers[ui_helpers / position_diagram]
   end
   subgraph backendLayer [backend]
@@ -106,22 +108,28 @@ flowchart LR
     toc[toc_handler]
     pages[page_spec]
     cfg[page_number_config]
+    geom[page_geometry]
     sess[session_manager]
   end
   mainPy --> dialog
   mainPy --> window
   window --> splitDlg
+  window --> posPanel
   window --> helpers
   window --> files
   window --> pdf
   window --> toc
   window --> pages
   window --> cfg
+  window --> geom
   window --> sess
+  posPanel --> cfg
+  posPanel --> helpers
   dialog --> sess
   pdf --> toc
   pdf --> pages
   pdf --> cfg
+  pdf --> geom
 ```
 
 ### Package layout
@@ -135,6 +143,7 @@ PageNumberingTool/
 ├── requirements.txt
 ├── backend/                # Domain / PDF logic (no Qt)
 │   ├── file_handler.py     # Extension checks, path helpers
+│   ├── page_geometry.py    # Page size / orientation classification
 │   ├── page_number_config.py
 │   ├── page_spec.py        # Page ranges, InsertionSegment, split groups
 │   ├── pdf_processor.py    # Convert, merge, stamp numbers
@@ -144,6 +153,7 @@ PageNumberingTool/
     ├── main_window.py      # Main UI and orchestration
     ├── session_dialog.py
     ├── split_dialog.py
+    ├── position_panel.py   # Position controls for one page type
     ├── position_diagram.py
     └── ui_helpers.py
 ```
@@ -155,7 +165,8 @@ PageNumberingTool/
 | `file_handler` | Validate supported paths (`.pdf`, `.docx`, `.doc`) |
 | `page_spec` | Parse page specs (`1-4`, `5,6,7`), split groups, `InsertionSegment` model |
 | `page_number_config` | Presets, formatting, origins, load `fonts.json` |
-| `pdf_processor` | Word→PDF (COM), page counts, extract/merge pages, stamp numbers with ReportLab/pikepdf |
+| `page_geometry` | Classify page dimensions into named sizes (A-series, Letter, …) plus orientation; group a document's pages into page types |
+| `pdf_processor` | Word→PDF (COM), page counts, per-page dimensions, extract/merge pages, stamp numbers with ReportLab/pikepdf |
 | `toc_handler` | Detect TOC pages/entries, adjust page numbers after insertions, overlay updated numbers, apply outline bookmarks |
 | `session_manager` | Save/load session JSON; name files as `YYMMDD_user_document.json` |
 
@@ -166,6 +177,7 @@ PageNumberingTool/
 | `session_dialog` | Startup: new session vs open existing |
 | `main_window` | File table, numbering form, TOC preview, process action |
 | `split_dialog` | Multi-line page-group editor for one insert file |
+| `position_panel` | Relative/absolute position controls + diagram for one page type |
 | `position_diagram` | Live preview of number position on a page thumbnail |
 | `ui_helpers` | Shared form layout helpers |
 
@@ -177,7 +189,7 @@ When **Process** runs, `PDFProcessor.process_files_with_main` does roughly:
 2. For each insertion, extract the selected page subset if needed.
 3. Merge: main PDF with inserts spliced after the chosen pages.
 4. If TOC can be updated in place, rewrite visible TOC page numbers for the new layout.
-5. Stamp page numbers onto every page while preserving existing links.
+5. Stamp page numbers onto every page while preserving existing links, choosing the settings configured for each page's size and orientation.
 6. Rebuild the PDF outline from TOC entries with page numbers adjusted for insertions.
 
 ---
@@ -190,7 +202,7 @@ Sessions are JSON files in:
 %USERPROFILE%\The Reportinator\
 ```
 
-They store the main path, insertion segments (path, pages spec, insert-after), and page-numbering options so you can pause and resume large report builds.
+They store the main path, insertion segments (path, pages spec, insert-after), and page-numbering options so you can pause and resume large report builds. Positions are saved per page type under `position_by_page_type`, alongside flat position keys describing the page type that was on screen. Sessions written before per-page-type positions existed still load: their single saved position is applied to every detected page type.
 
 ---
 
@@ -209,4 +221,5 @@ Output is always a single combined `.pdf`.
 
 - **Windows + Word** are required for Word conversion; PDF-only workflows do not need Word open for every step, but conversion does.
 - TOC **visible** number updates succeed only when anchors can be matched reliably; otherwise chapter **bookmarks/links** are still applied where possible, and a note is shown after processing.
-- Page numbering positions assume common page sizes (UI helpers use A4 cm for absolute mode); verify critical layouts on a sample export.
+- Page sizes within 3 mm of a nominal size are treated as that size; anything else is labelled by its measured dimensions (e.g. `200×450 mm Portrait`). A page rotated with `/Rotate` is classified as the reader sees it, so a rotated A4 page counts as A4 Landscape.
+- A page size that only appears after merging (so it was never detected at upload) falls back to the position shown in the active tab; verify critical layouts on a sample export.
