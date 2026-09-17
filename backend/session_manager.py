@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from getpass import getuser
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 SESSION_FOLDER_NAME = "The Reportinator"
 # v2: flat inserter-only payload. v3: separate ``inserter`` / ``swapper`` tabs.
@@ -48,21 +48,62 @@ def build_session_filename(main_file_path: Optional[str], username: Optional[str
     return f"{date_part}_{user_part}_{main_part}.json"
 
 
-def list_session_files() -> List[Tuple[Path, str]]:
+class SessionListEntry(NamedTuple):
+    """One JSON file shown in the session picker."""
+
+    path: Path
+    file_name: str
+    author: str
+    last_modified: str
+
+    @property
+    def summary(self) -> str:
+        return f"{self.file_name}  (saved {self.last_modified})"
+
+
+def session_author(path: Path) -> str:
+    """Author from the session JSON ``username`` field, or the filename."""
+    try:
+        data = load_session(path)
+        username = data.get("username")
+        if isinstance(username, str) and username.strip():
+            return username.strip()
+    except (OSError, ValueError, TypeError):
+        pass
+    parts = path.stem.split("_", 2)
+    if len(parts) >= 2 and len(parts[0]) == 6 and parts[0].isdigit():
+        return parts[1]
+    return "—"
+
+
+def list_session_files(folder: Optional[Path] = None) -> List[SessionListEntry]:
     """
-    List JSON session files in the session directory.
+    List JSON session files in ``folder`` (default: the app session directory).
 
     Returns:
-        List of (path, display summary) sorted newest first.
+        Entries sorted newest first.
     """
-    folder = session_directory()
-    entries: List[Tuple[Path, str]] = []
-    for path in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    directory = Path(folder) if folder is not None else session_directory()
+    if not directory.is_dir():
+        return []
+    entries: List[SessionListEntry] = []
+    for path in sorted(
+        directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    ):
         try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                "%Y-%m-%d %H:%M"
+            )
         except OSError:
             mtime = "unknown"
-        entries.append((path, f"{path.name}  (saved {mtime})"))
+        entries.append(
+            SessionListEntry(
+                path=path,
+                file_name=path.name,
+                author=session_author(path),
+                last_modified=mtime,
+            )
+        )
     return entries
 
 

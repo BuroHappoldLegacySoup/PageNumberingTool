@@ -875,7 +875,7 @@ class SwapperTab(QWidget):
             return
         from PyQt6.QtWidgets import QInputDialog
 
-        labels = [summary for _, summary in sessions]
+        labels = [entry.summary for entry in sessions]
         choice, ok = QInputDialog.getItem(
             self,
             "Saved sessions",
@@ -886,9 +886,9 @@ class SwapperTab(QWidget):
         )
         if not ok or not choice:
             return
-        for path, summary in sessions:
-            if summary == choice:
-                self._load_session_style(path)
+        for entry in sessions:
+            if entry.summary == choice:
+                self._load_session_style(entry.path)
                 return
 
     def _load_session_style(self, path: Path, show_status: bool = True) -> bool:

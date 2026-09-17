@@ -573,6 +573,7 @@ def example_text_from_numbering(
         label=label,
         prefix=str(numbering.get("chapter_prefix", "")),
         num_digits=max(1, int(numbering.get("num_digits", 1))),
+        fixed_num_digits=bool(numbering.get("fixed_num_digits", True)),
         separator=str(numbering.get("separator", DEFAULT_SEPARATOR) or DEFAULT_SEPARATOR),
         suffix=str(numbering.get("suffix", "")),
     )
@@ -630,6 +631,7 @@ def page_number_settings_from_session(numbering: Dict[str, Any]) -> PageNumberSe
         label_text=label,
         chapter_prefix=str(numbering.get("chapter_prefix", "")),
         num_digits=max(1, int(numbering.get("num_digits", 1))),
+        fixed_num_digits=bool(numbering.get("fixed_num_digits", True)),
         separator=str(numbering.get("separator", DEFAULT_SEPARATOR) or DEFAULT_SEPARATOR),
         position_name=position_name,
         position_mode=position_mode,

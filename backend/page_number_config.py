@@ -48,6 +48,7 @@ class PageNumberSettings:
     label_text: str = "Page"
     chapter_prefix: str = ""
     num_digits: int = 1
+    fixed_num_digits: bool = False
     separator: str = DEFAULT_SEPARATOR
     position_name: str = DEFAULT_POSITION
     position_mode: str = POSITION_RELATIVE
@@ -77,6 +78,7 @@ class PageNumberSettings:
             label=self.label_text,
             prefix=self.chapter_prefix,
             num_digits=self.num_digits,
+            fixed_num_digits=self.fixed_num_digits,
             separator=self.separator,
             suffix=self.suffix,
         )
@@ -130,6 +132,7 @@ def format_page_number_text(
     label: str,
     prefix: str,
     num_digits: int,
+    fixed_num_digits: bool = True,
     separator: str = DEFAULT_SEPARATOR,
     suffix: str = "",
 ) -> str:
@@ -138,8 +141,12 @@ def format_page_number_text(
 
     Example: Seite + prefix 5.7 + sep '.' + 3 digits -> "Seite 5.7.001"
     With suffix '-' -> "Seite 5.7.001 -"
+    When ``fixed_num_digits`` is false, the page index is not zero-padded.
     """
-    padded = str(page_num).zfill(max(1, num_digits))
+    if fixed_num_digits:
+        padded = str(page_num).zfill(max(1, num_digits))
+    else:
+        padded = str(page_num)
     prefix = prefix.strip()
     sep = separator if separator else DEFAULT_SEPARATOR
     if use_label and prefix:

@@ -245,13 +245,25 @@ class MainWindow(QMainWindow):
         self.chapter_prefix_edit.textChanged.connect(self._on_numbering_option_changed)
         prefix_digits_row.addWidget(self.chapter_prefix_edit, stretch=1)
 
+        self.fixed_digits_checkbox = QCheckBox("Fixed number of digits?")
+        self.fixed_digits_checkbox.setToolTip(
+            "When enabled, page numbers are zero-padded to the chosen width "
+            "(e.g. 001, 002). When disabled, numbering runs 1, 2, 3… without padding."
+        )
+        self.fixed_digits_checkbox.stateChanged.connect(
+            self._on_fixed_digits_checkbox_changed
+        )
+        prefix_digits_row.addWidget(self.fixed_digits_checkbox)
+
         prefix_digits_row.addWidget(QLabel("Number of digits:"))
         self.digits_spinbox = prepare_spinbox(QSpinBox(), 56)
         self.digits_spinbox.setMinimum(1)
         self.digits_spinbox.setMaximum(12)
         self.digits_spinbox.setValue(1)
+        self.digits_spinbox.setEnabled(False)
         self.digits_spinbox.setToolTip(
-            "Minimum increases with document size (2+ for 10+ pages, 3+ for 100+, etc.)"
+            "Zero-pad page numbers to this width. Minimum increases with document "
+            "size (2+ for 10+ pages, 3+ for 100+, etc.) when fixed digits is on."
         )
         self.digits_spinbox.valueChanged.connect(self._on_numbering_option_changed)
         prefix_digits_row.addWidget(self.digits_spinbox)
@@ -397,6 +409,13 @@ class MainWindow(QMainWindow):
         self.seite_radio.setEnabled(enabled)
         self.custom_label_radio.setEnabled(enabled)
         self._on_label_type_changed()
+        self._on_numbering_option_changed()
+
+    def _on_fixed_digits_checkbox_changed(self) -> None:
+        enabled = self.fixed_digits_checkbox.isChecked()
+        self.digits_spinbox.setEnabled(enabled)
+        if enabled:
+            self._update_digits_minimum()
         self._on_numbering_option_changed()
 
     def _on_label_type_changed(self) -> None:
@@ -671,6 +690,8 @@ class MainWindow(QMainWindow):
         return total_pages
 
     def _update_digits_minimum(self) -> None:
+        if not self.fixed_digits_checkbox.isChecked():
+            return
         total = self._get_total_page_count()
         min_digits = minimum_digits_for_page_count(total)
         self.digits_spinbox.setMinimum(min_digits)
@@ -717,6 +738,7 @@ class MainWindow(QMainWindow):
             label_text=self._resolve_label_text(),
             chapter_prefix=self.chapter_prefix_edit.text(),
             num_digits=self.digits_spinbox.value(),
+            fixed_num_digits=self.fixed_digits_checkbox.isChecked(),
             separator=sep,
             position_name=position.position_name,
             position_mode=position.position_mode,
@@ -1736,6 +1758,7 @@ class MainWindow(QMainWindow):
                 "label_type": self._label_type_key(),
                 "custom_label": self.custom_label_edit.text(),
                 "chapter_prefix": self.chapter_prefix_edit.text(),
+                "fixed_num_digits": self.fixed_digits_checkbox.isChecked(),
                 "num_digits": self.digits_spinbox.value(),
                 "separator": self.separator_edit.text(),
                 "suffix": self.suffix_edit.text(),
@@ -1958,6 +1981,10 @@ class MainWindow(QMainWindow):
             self.page_radio.setChecked(True)
         self.custom_label_edit.setText(str(numbering.get("custom_label", "")))
         self.chapter_prefix_edit.setText(str(numbering.get("chapter_prefix", "")))
+        self.fixed_digits_checkbox.setChecked(
+            bool(numbering.get("fixed_num_digits", True))
+        )
+        self.digits_spinbox.setEnabled(self.fixed_digits_checkbox.isChecked())
         self.digits_spinbox.setValue(int(numbering.get("num_digits", 1)))
         self.separator_edit.setText(str(numbering.get("separator", DEFAULT_SEPARATOR)))
         self.suffix_edit.setText(str(numbering.get("suffix", "")))
