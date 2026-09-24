@@ -11,8 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
@@ -67,7 +67,7 @@ class PositionSettingsPanel(QWidget):
     preview shows.
     """
 
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(
         self,

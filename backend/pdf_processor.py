@@ -1292,21 +1292,30 @@ class PDFProcessor:
                 page_settings = self._settings_for_page(
                     width, height, rotation, settings, settings_by_page_type
                 )
+                display_w, display_h = self._get_display_dimensions(
+                    width, height, rotation
+                )
 
                 temp_watermark_path = tempfile.NamedTemporaryFile(
                     delete=False, suffix=".pdf"
                 ).name
                 try:
-                    c = canvas.Canvas(temp_watermark_path, pagesize=(width, height))
+                    # pikepdf's add_overlay counter-rotates the overlay for the
+                    # page's /Rotate, so the stamp must be drawn upright in
+                    # viewer orientation rather than pre-rotated to user space.
+                    c = canvas.Canvas(
+                        temp_watermark_path, pagesize=(display_w, display_h)
+                    )
                     text = page_settings.format_number(page_num)
                     self._draw_page_number_on_canvas(
-                        c, text, width, height, page_settings, rotation
+                        c, text, display_w, display_h, page_settings, 0
                     )
                     c.save()
 
                     with pikepdf.Pdf.open(temp_watermark_path) as stamp_pdf:
                         page.add_overlay(
                             stamp_pdf.pages[0],
+                            pikepdf.Rectangle(*[float(v) for v in mediabox]),
                             shrink=False,
                             expand=False,
                         )

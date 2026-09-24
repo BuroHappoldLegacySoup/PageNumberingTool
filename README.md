@@ -29,7 +29,7 @@ Typical use: start from a main Word/PDF body, insert appendices or chapter PDFs 
 Python packages (see [`requirements.txt`](requirements.txt)):
 
 ```
-PyQt6, PyPDF2, python-docx, reportlab, pywin32, pdfplumber, pikepdf
+PySide6, PyPDF2, python-docx, reportlab, pywin32, pdfplumber, pikepdf
 ```
 
 ---
@@ -149,7 +149,7 @@ PageNumberingTool/
 │   ├── pdf_processor.py    # Convert, merge, stamp numbers
 │   ├── session_manager.py  # Session JSON under ~/The Reportinator
 │   └── toc_handler.py      # TOC extract, overlay, bookmarks
-└── gui/                    # PyQt6 presentation
+└── gui/                    # PySide6 presentation
     ├── main_window.py      # Main UI and orchestration
     ├── session_dialog.py
     ├── split_dialog.py

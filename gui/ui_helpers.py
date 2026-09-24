@@ -2,13 +2,16 @@
 Compact form layout helpers for the main window.
 """
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtWidgets import (
+    QAbstractSlider,
+    QAbstractSpinBox,
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
     QLabel,
     QLineEdit,
+    QScrollBar,
     QSizePolicy,
     QSpinBox,
     QWidget,
@@ -16,6 +19,26 @@ from PyQt6.QtWidgets import (
 
 # Comfortable minimums for legibility on high-DPI displays
 FIELD_MIN_HEIGHT = 28
+
+
+class WheelGuard(QObject):
+    """
+    Application-wide filter that stops the mouse wheel from changing spin boxes,
+    combo boxes and sliders. The wheel event is passed on to the parent so the
+    surrounding scroll area still scrolls.
+    """
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
+        if event.type() == QEvent.Type.Wheel and _is_wheel_guarded(obj):
+            event.ignore()
+            return True
+        return super().eventFilter(obj, event)
+
+
+def _is_wheel_guarded(obj: QObject) -> bool:
+    if isinstance(obj, (QAbstractSpinBox, QComboBox)):
+        return True
+    return isinstance(obj, QAbstractSlider) and not isinstance(obj, QScrollBar)
 
 
 def prepare_line_edit(edit: QLineEdit, min_width: int) -> QLineEdit:

@@ -2,9 +2,9 @@
 Small diagram widget showing page-number position as % from a chosen origin corner.
 """
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QWidget
 
 from backend.page_number_config import (
     DEFAULT_ORIGIN,

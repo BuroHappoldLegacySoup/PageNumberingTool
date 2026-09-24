@@ -7,9 +7,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QEvent, Qt, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -812,7 +812,7 @@ class SwapperTab(QWidget):
         )
 
     def _pick_highlight_color(self) -> None:
-        from PyQt6.QtWidgets import QColorDialog
+        from PySide6.QtWidgets import QColorDialog
 
         initial = QColor(
             self.color_r_spin.value(),
@@ -873,7 +873,7 @@ class SwapperTab(QWidget):
                 f"No saved sessions found in:\n{session_directory()}",
             )
             return
-        from PyQt6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
 
         labels = [entry.summary for entry in sessions]
         choice, ok = QInputDialog.getItem(

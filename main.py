@@ -20,10 +20,11 @@ def _ensure_stdio() -> None:
 
 _ensure_stdio()
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
 from gui.session_dialog import SessionStartDialog
+from gui.ui_helpers import WheelGuard
 
 
 def main() -> None:
@@ -31,6 +32,8 @@ def main() -> None:
     Main function to start the application.
     """
     app = QApplication(sys.argv)
+    wheel_guard = WheelGuard(app)
+    app.installEventFilter(wheel_guard)
 
     session_path, is_new = SessionStartDialog.run()
     if not is_new and session_path is None:

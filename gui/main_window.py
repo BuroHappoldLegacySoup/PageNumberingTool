@@ -1,10 +1,10 @@
 """
 Main window module for The Reportinator application.
-Contains the PyQt6 UI components and main application logic.
+Contains the PySide6 UI components and main application logic.
 """
 
 from typing import List, Optional, Dict, Tuple, Any, Callable
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QFileDialog, QLabel, QSpinBox, QMessageBox, QGroupBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QRadioButton,
@@ -12,8 +12,8 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QGridLayout, QFrame, QSizePolicy, QScrollArea,
     QProgressDialog, QApplication, QDialog, QTabWidget,
 )
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QColor, QFont, QDesktopServices
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QColor, QFont, QDesktopServices
 from pathlib import Path
 from datetime import datetime
 import json
@@ -664,7 +664,7 @@ class MainWindow(QMainWindow):
         )
 
     def _pick_font_color(self) -> None:
-        from PyQt6.QtWidgets import QColorDialog
+        from PySide6.QtWidgets import QColorDialog
 
         initial = QColor(
             self.color_r_spin.value(),
